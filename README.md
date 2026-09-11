@@ -18,15 +18,68 @@ The first provider is **BinX CSV**. The module currently:
 
 This staging-first design intentionally separates ingestion from reconciliation and posting. Future providers (Wise API, CAMT.053, MT940, other CSV formats or AISP APIs) can feed the same normalized model.
 
+## Repository and development model
+
+This repository is the **canonical development source** of the BankSync module. Development, commits, tests and releases must be made here first.
+
+The module is embedded into `vanyolai/dolibarr` as a squash-merged Git subtree:
+
+```text
+repository: vanyolai/dolibarr-banksync
+branch:     main
+consumer:   vanyolai/dolibarr
+branch:     23.0
+prefix:     htdocs/custom/banksync
+```
+
+The copy under `htdocs/custom/banksync` in the Dolibarr repository is therefore a downstream integration copy. Do not develop or hot-fix the module there directly unless the change is immediately exported back to this repository.
+
+A local Dolibarr checkout can configure the source repository as a remote once:
+
+```bash
+git remote add banksync https://github.com/vanyolai/dolibarr-banksync.git
+git fetch banksync
+```
+
+The initial subtree integration is performed with:
+
+```bash
+git subtree add \
+  --prefix=htdocs/custom/banksync \
+  banksync main \
+  --squash
+```
+
+After development has been committed and pushed to this repository, update the Dolibarr integration with:
+
+```bash
+git fetch banksync
+git subtree pull \
+  --prefix=htdocs/custom/banksync \
+  banksync main \
+  --squash
+```
+
+This keeps the standalone module history clean while the Dolibarr repository records only explicit integration points and pins the exact BankSync source commit through Git subtree metadata.
+
+If a change is ever made inside the Dolibarr subtree first, export it back before continuing normal development:
+
+```bash
+git subtree split --prefix=htdocs/custom/banksync -b banksync-export
+git push banksync banksync-export:main
+```
+
+Normal development should follow the opposite direction: **BankSync repository → Dolibarr subtree**.
+
 ## Installation
 
-Clone the repository into Dolibarr's custom module directory so the module root is:
+In the integrated `vanyolai/dolibarr` checkout the module is already located at:
 
 ```text
 htdocs/custom/banksync/
 ```
 
-For example:
+For an independent Dolibarr installation that does not consume the parent repository, cloning this repository directly into that location also works:
 
 ```bash
 cd /path/to/dolibarr/htdocs/custom
