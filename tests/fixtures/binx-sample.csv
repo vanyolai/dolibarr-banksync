@@ -1,0 +1,9 @@
+Konverziós számla száma,111111111111111111111111
+E-pénz rendelkezési számla száma,11111111
+Időszak kezdete,2026.08.02
+Időszak vége,2026.08.31
+Devizanem,HUF
+,
+Értéknap,Könyvelés napja,Terhelés vagy jóváírás (T/J),Összeg,Tranzakció típusa,Tranzakciós kód,Partner neve,Partner bankszámlaszáma,Közlemény,Tranzakció azonosító
+2026.08.02,2026.08.02,T,-402,Tranzakciós díj,CHRG,Tranzakciós díj,,munkaber,d4ddcf7b3cde4beeab7281a9ec77690e
+2026.08.02,2026.08.02,T,-268179,E-pénz visszaváltás azonnali forint átutalással,DMCT,Minta Partner,123456781234567812345678,munkaber,d4ddcf7b3cde4beeab7281a9ec77690e
