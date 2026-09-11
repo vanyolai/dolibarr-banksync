@@ -12,10 +12,11 @@ CREATE TABLE llx_banksync_import(
     period_start DATE,
     period_end DATE,
     date_creation DATETIME NOT NULL,
-    tms TIMESTAMP,
-    fk_user_create INTEGER NOT NULL,
-    status VARCHAR(32) NOT NULL,
+    fk_user_create INTEGER,
+    status VARCHAR(32) DEFAULT 'processing' NOT NULL,
     transaction_count INTEGER DEFAULT 0 NOT NULL,
     imported_count INTEGER DEFAULT 0 NOT NULL,
-    skipped_count INTEGER DEFAULT 0 NOT NULL
+    skipped_count INTEGER DEFAULT 0 NOT NULL,
+    fk_banksync_account INTEGER,
+    tms TIMESTAMP
 ) ENGINE=innodb;
