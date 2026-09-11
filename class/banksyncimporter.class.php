@@ -53,6 +53,7 @@ class BankSyncImporter
         $existingImport = $this->findImportBySourceHash($statement->provider, $sourceSha256);
         if ($existingImport > 0) {
             $this->backfillSourceAccount($existingImport, $sourceAccountId);
+            $this->backfillClassification($existingImport);
             return array(
                 'import_id' => $existingImport,
                 'duplicate_file' => true,
@@ -143,6 +144,64 @@ class BankSyncImporter
         $sql .= ' WHERE fk_import = '.((int) $importId).' AND entity = '.$this->entity.' AND fk_banksync_account IS NULL';
         if (!$this->db->query($sql)) {
             throw new RuntimeException($this->db->lasterror());
+        }
+    }
+
+    /**
+     * Classify rows imported by an older BankSync version when the same source file is seen again.
+     * This is intentionally idempotent and only fills missing classification fields.
+     *
+     * @param int $importId Existing import id
+     * @return void
+     */
+    private function backfillClassification($importId)
+    {
+        $sql = 'SELECT rowid, provider, account_number, external_transaction_id, external_entry_id,';
+        $sql .= ' value_date, booking_date, direction, amount, currency, transaction_type, transaction_code,';
+        $sql .= ' counterparty_name, counterparty_account, reference';
+        $sql .= ' FROM '.$this->db->prefix().'banksync_transaction';
+        $sql .= ' WHERE fk_import = '.((int) $importId).' AND entity = '.$this->entity;
+        $sql .= " AND (bank_event_type IS NULL OR bank_event_type = '')";
+        $resql = $this->db->query($sql);
+        if (!$resql) {
+            throw new RuntimeException($this->db->lasterror());
+        }
+
+        $rows = array();
+        while ($obj = $this->db->fetch_object($resql)) {
+            $rows[] = $obj;
+        }
+        $this->db->free($resql);
+
+        foreach ($rows as $obj) {
+            $transaction = new BankTransaction();
+            $transaction->provider = (string) $obj->provider;
+            $transaction->accountNumber = (string) $obj->account_number;
+            $transaction->externalTransactionId = (string) $obj->external_transaction_id;
+            $transaction->externalEntryId = (string) $obj->external_entry_id;
+            $transaction->valueDate = (string) $obj->value_date;
+            $transaction->bookingDate = (string) $obj->booking_date;
+            $transaction->direction = (string) $obj->direction;
+            $transaction->amount = (string) $obj->amount;
+            $transaction->currency = (string) $obj->currency;
+            $transaction->transactionType = (string) $obj->transaction_type;
+            $transaction->transactionCode = (string) $obj->transaction_code;
+            $transaction->counterpartyName = (string) $obj->counterparty_name;
+            $transaction->counterpartyAccount = (string) $obj->counterparty_account;
+            $transaction->reference = (string) $obj->reference;
+            $this->classifier->classify($transaction);
+
+            $sql = 'UPDATE '.$this->db->prefix().'banksync_transaction SET';
+            $sql .= " bank_event_type = '".$this->db->escape($transaction->bankEventType)."'";
+            $sql .= $transaction->dolibarrPaymentCode !== ''
+                ? ", dolibarr_payment_code = '".$this->db->escape($transaction->dolibarrPaymentCode)."'"
+                : ', dolibarr_payment_code = NULL';
+            $sql .= ', classification_confidence = '.((int) $transaction->classificationConfidence);
+            $sql .= ", classification_method = '".$this->db->escape($transaction->classificationMethod)."'";
+            $sql .= ' WHERE rowid = '.((int) $obj->rowid).' AND entity = '.$this->entity;
+            if (!$this->db->query($sql)) {
+                throw new RuntimeException($this->db->lasterror());
+            }
         }
     }
 
