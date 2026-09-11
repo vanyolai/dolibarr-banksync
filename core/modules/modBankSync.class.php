@@ -23,7 +23,7 @@ class modBankSync extends DolibarrModules
         $this->name = preg_replace('/^mod/i', '', get_class($this));
         $this->description = 'BankSyncDescription';
         $this->descriptionlong = 'BankSyncDescriptionLong';
-        $this->version = '0.1.0';
+        $this->version = '0.2.0';
         $this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
         $this->picto = 'bank';
 
@@ -70,7 +70,7 @@ class modBankSync extends DolibarrModules
         $r++;
 
         $this->rights[$r][0] = 5003012;
-        $this->rights[$r][1] = 'Import bank statements';
+        $this->rights[$r][1] = 'Import bank statements and manage source account mappings';
         $this->rights[$r][2] = 'w';
         $this->rights[$r][3] = 0;
         $this->rights[$r][4] = 'import';
@@ -103,6 +103,21 @@ class modBankSync extends DolibarrModules
             'url' => '/banksync/index.php',
             'langs' => 'banksync@banksync',
             'position' => 100,
+            'enabled' => "isModEnabled('banksync')",
+            'perms' => '$user->hasRight("banksync", "read")',
+            'target' => '',
+            'user' => 0,
+        );
+
+        $this->menu[$r++] = array(
+            'fk_menu' => 'fk_mainmenu=banksync',
+            'type' => 'left',
+            'titre' => 'BankSyncAccounts',
+            'mainmenu' => 'banksync',
+            'leftmenu' => 'banksync_accounts',
+            'url' => '/banksync/accounts.php',
+            'langs' => 'banksync@banksync',
+            'position' => 103,
             'enabled' => "isModEnabled('banksync')",
             'perms' => '$user->hasRight("banksync", "read")',
             'target' => '',
