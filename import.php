@@ -19,6 +19,7 @@ if (!$res) {
 }
 
 require_once DOL_DOCUMENT_ROOT.'/core/lib/files.lib.php';
+require_once __DIR__.'/class/banksyncschema.class.php';
 require_once __DIR__.'/class/provider/binxcsvprovider.class.php';
 require_once __DIR__.'/class/banksyncimporter.class.php';
 
@@ -29,6 +30,12 @@ if (!isModEnabled('banksync')) {
 }
 if (!$user->hasRight('banksync', 'import')) {
     accessforbidden();
+}
+
+try {
+    BankSyncSchema::ensure($db);
+} catch (Exception $e) {
+    setEventMessages($langs->trans('BankSyncSchemaMigrationFailed', $e->getMessage()), null, 'errors');
 }
 
 $action = GETPOST('action', 'aZ09');
@@ -88,6 +95,9 @@ if ($action === 'import') {
                                 'mesgs'
                             );
                         }
+                        if (empty($lastResult['fk_bank_account'])) {
+                            setEventMessages($langs->trans('BankSyncSourceAccountNeedsMapping'), null, 'warnings');
+                        }
                     } catch (Exception $e) {
                         dol_syslog('BankSync import failed: '.$e->getMessage(), LOG_ERR);
                         setEventMessages($langs->trans('BankSyncImportError', $e->getMessage()), null, 'errors');
@@ -136,9 +146,23 @@ if ($statement !== null && $lastResult !== null) {
     print '<tr><td>'.$langs->trans('BankSyncTransactions').'</td><td>'.count($statement->transactions).'</td></tr>';
     print '<tr><td>'.$langs->trans('BankSyncImported').'</td><td>'.((int) $lastResult['imported_count']).'</td></tr>';
     print '<tr><td>'.$langs->trans('BankSyncSkipped').'</td><td>'.((int) $lastResult['skipped_count']).'</td></tr>';
+    print '<tr><td>'.$langs->trans('BankSyncAccountMapping').'</td><td>';
+    if (!empty($lastResult['fk_bank_account'])) {
+        print '<span class="badge badge-status4">'.$langs->trans('BankSyncMapped').'</span>';
+    } elseif (!empty($lastResult['suggested_fk_bank_account'])) {
+        print '<span class="badge badge-status1">'.$langs->trans('BankSyncSuggested').'</span> ';
+        print '<a href="'.dol_buildpath('/banksync/accounts.php', 1).'">'.$langs->trans('BankSyncReviewMapping').'</a>';
+    } else {
+        print '<span class="badge badge-status0">'.$langs->trans('BankSyncUnmapped').'</span> ';
+        print '<a href="'.dol_buildpath('/banksync/accounts.php', 1).'">'.$langs->trans('BankSyncMapAccount').'</a>';
+    }
+    print '</td></tr>';
     print '</table>';
 
-    print '<div class="center"><a class="butAction" href="'.dol_buildpath('/banksync/transactions.php', 1).'">'.$langs->trans('BankSyncViewTransactions').'</a></div>';
+    print '<div class="center">';
+    print '<a class="butAction" href="'.dol_buildpath('/banksync/transactions.php', 1).'">'.$langs->trans('BankSyncViewTransactions').'</a>';
+    print '<a class="butAction" href="'.dol_buildpath('/banksync/accounts.php', 1).'">'.$langs->trans('BankSyncAccounts').'</a>';
+    print '</div>';
 }
 
 llxFooter();
