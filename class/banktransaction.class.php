@@ -20,6 +20,10 @@ class BankTransaction
     public $counterpartyName = '';
     public $counterpartyAccount = '';
     public $reference = '';
+    public $bankEventType = '';
+    public $dolibarrPaymentCode = '';
+    public $classificationConfidence = 0;
+    public $classificationMethod = '';
     public $sourceLine = 0;
     public $rawData = array();
 }
