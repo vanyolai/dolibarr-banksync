@@ -77,10 +77,10 @@ print '</div>';
 print '<div class="fichehalfright">';
 print '<div class="center">';
 if ($user->hasRight('banksync', 'import')) {
-    print '<a class="butAction" href="'.dol_buildpath('/banksync/import.php', 1).'">'.$langs->trans('BankSyncImportStatement').'</a>';
+    print '<a class="butAction" href="'.dol_buildpath('/banksync/import.php', 1).'?mainmenu=bank&leftmenu=banksync_import">'.$langs->trans('BankSyncImportStatement').'</a>';
 }
-print '<a class="butAction" href="'.dol_buildpath('/banksync/accounts.php', 1).'">'.$langs->trans('BankSyncAccounts').'</a>';
-print '<a class="butAction" href="'.dol_buildpath('/banksync/transactions.php', 1).'">'.$langs->trans('BankSyncViewTransactions').'</a>';
+print '<a class="butAction" href="'.dol_buildpath('/banksync/accounts.php', 1).'?mainmenu=bank&leftmenu=banksync_accounts">'.$langs->trans('BankSyncAccounts').'</a>';
+print '<a class="butAction" href="'.dol_buildpath('/banksync/transactions.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions">'.$langs->trans('BankSyncViewTransactions').'</a>';
 print '</div>';
 print '</div>';
 print '</div>';
@@ -120,7 +120,7 @@ if ($resql) {
         print '<td>'.dol_escape_htmltag($obj->provider).'</td>';
         print '<td>'.dol_escape_htmltag($obj->source_filename).'</td>';
         print '<td>'.dol_escape_htmltag($obj->account_number).' ('.dol_escape_htmltag($obj->currency).')</td>';
-        print '<td>'.(!empty($obj->fk_bank_account) ? dol_escape_htmltag($obj->bank_account_label) : '<a href="'.dol_buildpath('/banksync/accounts.php', 1).'" class="error">'.$langs->trans('BankSyncUnmapped').'</a>').'</td>';
+        print '<td>'.(!empty($obj->fk_bank_account) ? dol_escape_htmltag($obj->bank_account_label) : '<a href="'.dol_buildpath('/banksync/accounts.php', 1).'?mainmenu=bank&leftmenu=banksync_accounts" class="error">'.$langs->trans('BankSyncUnmapped').'</a>').'</td>';
         print '<td>'.dol_escape_htmltag((string) $obj->period_start).' - '.dol_escape_htmltag((string) $obj->period_end).'</td>';
         print '<td class="right">'.((int) $obj->imported_count).' / '.((int) $obj->transaction_count).'</td>';
         print '<td class="right">'.((int) $obj->skipped_count).'</td>';
