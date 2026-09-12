@@ -115,7 +115,7 @@ print load_fiche_titre($langs->trans('BankSyncImport'), '', 'upload');
 
 print '<div class="opacitymedium">'.$langs->trans('BankSyncImportHelp').'</div><br>';
 
-print '<form method="POST" enctype="multipart/form-data" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
+print '<form method="POST" enctype="multipart/form-data" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_import">';
 print '<input type="hidden" name="token" value="'.newToken().'">';
 print '<input type="hidden" name="action" value="import">';
 
@@ -151,17 +151,17 @@ if ($statement !== null && $lastResult !== null) {
         print '<span class="badge badge-status4">'.$langs->trans('BankSyncMapped').'</span>';
     } elseif (!empty($lastResult['suggested_fk_bank_account'])) {
         print '<span class="badge badge-status1">'.$langs->trans('BankSyncSuggested').'</span> ';
-        print '<a href="'.dol_buildpath('/banksync/accounts.php', 1).'">'.$langs->trans('BankSyncReviewMapping').'</a>';
+        print '<a href="'.dol_buildpath('/banksync/accounts.php', 1).'?mainmenu=bank&leftmenu=banksync_accounts">'.$langs->trans('BankSyncReviewMapping').'</a>';
     } else {
         print '<span class="badge badge-status0">'.$langs->trans('BankSyncUnmapped').'</span> ';
-        print '<a href="'.dol_buildpath('/banksync/accounts.php', 1).'">'.$langs->trans('BankSyncMapAccount').'</a>';
+        print '<a href="'.dol_buildpath('/banksync/accounts.php', 1).'?mainmenu=bank&leftmenu=banksync_accounts">'.$langs->trans('BankSyncMapAccount').'</a>';
     }
     print '</td></tr>';
     print '</table>';
 
     print '<div class="center">';
-    print '<a class="butAction" href="'.dol_buildpath('/banksync/transactions.php', 1).'">'.$langs->trans('BankSyncViewTransactions').'</a>';
-    print '<a class="butAction" href="'.dol_buildpath('/banksync/accounts.php', 1).'">'.$langs->trans('BankSyncAccounts').'</a>';
+    print '<a class="butAction" href="'.dol_buildpath('/banksync/transactions.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions">'.$langs->trans('BankSyncViewTransactions').'</a>';
+    print '<a class="butAction" href="'.dol_buildpath('/banksync/accounts.php', 1).'?mainmenu=bank&leftmenu=banksync_accounts">'.$langs->trans('BankSyncAccounts').'</a>';
     print '</div>';
 }
 
