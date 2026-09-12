@@ -103,7 +103,7 @@ if ($resql) {
             }
             print dol_escape_htmltag($bankLabel);
         } else {
-            print '<a href="'.dol_buildpath('/banksync/accounts.php', 1).'" class="error">'.$langs->trans('BankSyncUnmapped').'</a>';
+            print '<a href="'.dol_buildpath('/banksync/accounts.php', 1).'?mainmenu=bank&leftmenu=banksync_accounts" class="error">'.$langs->trans('BankSyncUnmapped').'</a>';
         }
         if (!empty($obj->source_account_number)) {
             print '<br><span class="opacitymedium small">'.dol_escape_htmltag($obj->source_account_number).'</span>';
@@ -124,10 +124,10 @@ print '</div>';
 
 print '<div class="pagination">';
 if ($page > 0) {
-    print '<a class="button" href="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?page='.($page - 1).'">&laquo; '.$langs->trans('Previous').'</a> ';
+    print '<a class="button" href="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions&page='.($page - 1).'">&laquo; '.$langs->trans('Previous').'</a> ';
 }
 if ($hasMore) {
-    print '<a class="button" href="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?page='.($page + 1).'">'.$langs->trans('Next').' &raquo;</a>';
+    print '<a class="button" href="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions&page='.($page + 1).'">'.$langs->trans('Next').' &raquo;</a>';
 }
 print '</div>';
 
