@@ -23,21 +23,15 @@ class BankSyncTransactionClassifier
 
     /**
      * Mutate and return a normalized transaction with classification fields populated.
-     * Existing non-empty classification is preserved.
+     * Provider-specific exact codes are authoritative and may replace an older heuristic
+     * classification. Otherwise an existing non-empty classification is preserved.
      *
      * @param BankTransaction $transaction Transaction
      * @return BankTransaction
      */
     public function classify($transaction)
     {
-        if ($transaction->bankEventType !== '') {
-            return $transaction;
-        }
-
         $code = strtoupper(trim((string) $transaction->transactionCode));
-        $type = $this->lower((string) $transaction->transactionType);
-        $reference = $this->lower((string) $transaction->reference);
-        $text = trim($type.' '.$reference);
 
         if ($transaction->provider === 'binx_csv') {
             if ($code === 'CHRG') {
@@ -46,7 +40,21 @@ class BankSyncTransactionClassifier
             if ($code === 'DMCT') {
                 return $this->apply($transaction, self::TYPE_TRANSFER, 'VIR', 98, 'binx_code:DMCT');
             }
+            if ($code === 'CAPA') {
+                return $this->apply($transaction, self::TYPE_CARD, 'CB', 100, 'binx_code:CAPA');
+            }
+            if ($code === 'PPCF') {
+                return $this->apply($transaction, self::TYPE_BANK_FEE, '', 100, 'binx_code:PPCF');
+            }
         }
+
+        if ($transaction->bankEventType !== '') {
+            return $transaction;
+        }
+
+        $type = $this->lower((string) $transaction->transactionType);
+        $reference = $this->lower((string) $transaction->reference);
+        $text = trim($type.' '.$reference);
 
         if ($this->containsAny($text, array('bankkárty', 'bankkart', 'card purchase', 'card payment', 'kártyás'))) {
             return $this->apply($transaction, self::TYPE_CARD, 'CB', 85, 'text:card');
