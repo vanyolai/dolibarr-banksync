@@ -25,6 +25,15 @@ if ($transfer->bankEventType !== 'transfer' || $transfer->dolibarrPaymentCode !=
     $failures[] = 'DMCT classification';
 }
 
+$creditTransfer = new BankTransaction();
+$creditTransfer->provider = 'binx_csv';
+$creditTransfer->transactionCode = 'CDPT';
+$creditTransfer->transactionType = 'Beérkező forint átutalás';
+$classifier->classify($creditTransfer);
+if ($creditTransfer->bankEventType !== 'transfer' || $creditTransfer->dolibarrPaymentCode !== 'VIR') {
+    $failures[] = 'CDPT classification';
+}
+
 $card = new BankTransaction();
 $card->provider = 'binx_csv';
 $card->transactionCode = 'CAPA';
