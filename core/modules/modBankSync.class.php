@@ -23,7 +23,7 @@ class modBankSync extends DolibarrModules
         $this->name = preg_replace('/^mod/i', '', get_class($this));
         $this->description = 'BankSyncDescription';
         $this->descriptionlong = 'BankSyncDescriptionLong';
-        $this->version = '0.2.0';
+        $this->version = '0.2.1';
         $this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
         $this->picto = 'bank';
 
@@ -76,18 +76,21 @@ class modBankSync extends DolibarrModules
         $this->rights[$r][4] = 'import';
         $r++;
 
+        // BankSync lives inside the native Bank / Cash main menu. The first entry is
+        // a BankSync section; its child entries form the module navigation beneath it.
         $this->menu = array();
         $r = 0;
+
         $this->menu[$r++] = array(
-            'fk_menu' => '',
-            'type' => 'top',
+            'fk_menu' => 'fk_mainmenu=bank',
+            'type' => 'left',
             'titre' => 'BankSync',
-            'prefix' => img_picto('', $this->picto, 'class="pictofixedwidth valignmiddle"'),
-            'mainmenu' => 'banksync',
-            'leftmenu' => '',
-            'url' => '/banksync/index.php',
+            'prefix' => img_picto('', $this->picto, 'class="pictofixedwidth valignmiddle paddingright"'),
+            'mainmenu' => 'bank',
+            'leftmenu' => 'banksync',
+            'url' => '/banksync/index.php?mainmenu=bank&leftmenu=banksync',
             'langs' => 'banksync@banksync',
-            'position' => 100,
+            'position' => 90,
             'enabled' => "isModEnabled('banksync')",
             'perms' => '$user->hasRight("banksync", "read")',
             'target' => '',
@@ -95,14 +98,14 @@ class modBankSync extends DolibarrModules
         );
 
         $this->menu[$r++] = array(
-            'fk_menu' => 'fk_mainmenu=banksync',
+            'fk_menu' => 'fk_mainmenu=bank,fk_leftmenu=banksync',
             'type' => 'left',
             'titre' => 'BankSyncDashboard',
-            'mainmenu' => 'banksync',
+            'mainmenu' => 'bank',
             'leftmenu' => 'banksync_dashboard',
-            'url' => '/banksync/index.php',
+            'url' => '/banksync/index.php?mainmenu=bank&leftmenu=banksync_dashboard',
             'langs' => 'banksync@banksync',
-            'position' => 100,
+            'position' => 91,
             'enabled' => "isModEnabled('banksync')",
             'perms' => '$user->hasRight("banksync", "read")',
             'target' => '',
@@ -110,14 +113,14 @@ class modBankSync extends DolibarrModules
         );
 
         $this->menu[$r++] = array(
-            'fk_menu' => 'fk_mainmenu=banksync',
+            'fk_menu' => 'fk_mainmenu=bank,fk_leftmenu=banksync',
             'type' => 'left',
             'titre' => 'BankSyncAccounts',
-            'mainmenu' => 'banksync',
+            'mainmenu' => 'bank',
             'leftmenu' => 'banksync_accounts',
-            'url' => '/banksync/accounts.php',
+            'url' => '/banksync/accounts.php?mainmenu=bank&leftmenu=banksync_accounts',
             'langs' => 'banksync@banksync',
-            'position' => 103,
+            'position' => 92,
             'enabled' => "isModEnabled('banksync')",
             'perms' => '$user->hasRight("banksync", "read")',
             'target' => '',
@@ -125,14 +128,14 @@ class modBankSync extends DolibarrModules
         );
 
         $this->menu[$r++] = array(
-            'fk_menu' => 'fk_mainmenu=banksync',
+            'fk_menu' => 'fk_mainmenu=bank,fk_leftmenu=banksync',
             'type' => 'left',
             'titre' => 'BankSyncTransactions',
-            'mainmenu' => 'banksync',
+            'mainmenu' => 'bank',
             'leftmenu' => 'banksync_transactions',
-            'url' => '/banksync/transactions.php',
+            'url' => '/banksync/transactions.php?mainmenu=bank&leftmenu=banksync_transactions',
             'langs' => 'banksync@banksync',
-            'position' => 105,
+            'position' => 93,
             'enabled' => "isModEnabled('banksync')",
             'perms' => '$user->hasRight("banksync", "read")',
             'target' => '',
@@ -140,14 +143,14 @@ class modBankSync extends DolibarrModules
         );
 
         $this->menu[$r++] = array(
-            'fk_menu' => 'fk_mainmenu=banksync',
+            'fk_menu' => 'fk_mainmenu=bank,fk_leftmenu=banksync',
             'type' => 'left',
             'titre' => 'BankSyncImport',
-            'mainmenu' => 'banksync',
+            'mainmenu' => 'bank',
             'leftmenu' => 'banksync_import',
-            'url' => '/banksync/import.php',
+            'url' => '/banksync/import.php?mainmenu=bank&leftmenu=banksync_import',
             'langs' => 'banksync@banksync',
-            'position' => 110,
+            'position' => 94,
             'enabled' => "isModEnabled('banksync')",
             'perms' => '$user->hasRight("banksync", "import")',
             'target' => '',
