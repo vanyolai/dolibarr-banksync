@@ -148,8 +148,9 @@ class BankSyncImporter
     }
 
     /**
-     * Classify rows imported by an older BankSync version when the same source file is seen again.
-     * This is intentionally idempotent and only fills missing classification fields.
+     * Reclassify rows from older BankSync versions when the same source file is seen again.
+     * Missing classifications are filled, and authoritative provider-specific codes are
+     * refreshed so improved exact mappings can replace an older heuristic result.
      *
      * @param int $importId Existing import id
      * @return void
@@ -161,7 +162,8 @@ class BankSyncImporter
         $sql .= ' counterparty_name, counterparty_account, reference';
         $sql .= ' FROM '.$this->db->prefix().'banksync_transaction';
         $sql .= ' WHERE fk_import = '.((int) $importId).' AND entity = '.$this->entity;
-        $sql .= " AND (bank_event_type IS NULL OR bank_event_type = '')";
+        $sql .= " AND ((bank_event_type IS NULL OR bank_event_type = '')";
+        $sql .= " OR (provider = 'binx_csv' AND transaction_code IN ('CHRG', 'DMCT', 'CAPA', 'PPCF')))";
         $resql = $this->db->query($sql);
         if (!$resql) {
             throw new RuntimeException($this->db->lasterror());
