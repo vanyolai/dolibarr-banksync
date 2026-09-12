@@ -38,7 +38,10 @@ class BankSyncTransactionClassifier
                 return $this->apply($transaction, self::TYPE_BANK_FEE, '', 100, 'binx_code:CHRG');
             }
             if ($code === 'DMCT') {
-                return $this->apply($transaction, self::TYPE_TRANSFER, 'VIR', 98, 'binx_code:DMCT');
+                return $this->apply($transaction, self::TYPE_TRANSFER, 'VIR', 100, 'binx_code:DMCT');
+            }
+            if ($code === 'CDPT') {
+                return $this->apply($transaction, self::TYPE_TRANSFER, 'VIR', 100, 'binx_code:CDPT');
             }
             if ($code === 'CAPA') {
                 return $this->apply($transaction, self::TYPE_CARD, 'CB', 100, 'binx_code:CAPA');
