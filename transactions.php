@@ -23,6 +23,22 @@ try {
     setEventMessages($langs->trans('BankSyncSchemaMigrationFailed', $e->getMessage()), null, 'errors');
 }
 
+// Reconciliation pages return to transactions.php without list-state parameters.
+// A short-lived one-shot cookie set by the clicked row lets us restore the exact
+// page and row anchor without coupling reconcile.php to list pagination details.
+if (!isset($_GET['page']) && !isset($_POST['page']) && !empty($_COOKIE['banksync_return'])) {
+    $returnState = (string) $_COOKIE['banksync_return'];
+    setcookie('banksync_return', '', time() - 3600, '/');
+    if (preg_match('/^(\d+):(\d+)$/', $returnState, $matches)) {
+        $returnPage = max(0, (int) $matches[1]);
+        $returnRow = max(0, (int) $matches[2]);
+        $returnUrl = dol_buildpath('/banksync/transactions.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&page='.$returnPage;
+        if ($returnRow > 0) $returnUrl .= '#banksync-tx-'.$returnRow;
+        header('Location: '.$returnUrl);
+        exit;
+    }
+}
+
 $page = max(0, GETPOSTINT('page'));
 $limit = 50;
 $offset = $page * $limit;
@@ -84,7 +100,7 @@ llxHeader('', $langs->trans('BankSyncTransactions'));
 print load_fiche_titre($langs->trans('BankSyncTransactions'), '', 'bank');
 
 if ($user->hasRight('banksync', 'import')) {
-    print '<div class="tabsAction"><form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions" class="inline-block">';
+    print '<div class="tabsAction"><form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions&page='.$page.'" class="inline-block">';
     print '<input type="hidden" name="token" value="'.newToken().'"><input type="hidden" name="action" value="scan_candidates">';
     print '<button type="submit" class="butAction">'.$langs->trans('BankSyncScanCandidates').'</button></form></div>';
 }
@@ -98,7 +114,7 @@ if ($resql) {
     while ($obj = $db->fetch_object($resql)) {
         if ($num >= $limit) { $hasMore = true; break; }
         $num++;
-        print '<tr class="oddeven"><td>'.dol_escape_htmltag((string) $obj->booking_date).'</td><td>';
+        print '<tr id="banksync-tx-'.(int) $obj->rowid.'" class="oddeven"><td>'.dol_escape_htmltag((string) $obj->booking_date).'</td><td>';
         $eventType = !empty($obj->bank_event_type) ? $obj->bank_event_type : 'other';
         print dol_escape_htmltag($langs->trans('BankSyncEventType_'.$eventType));
         if (!empty($obj->dolibarr_payment_code)) print '<br><span class="opacitymedium small">'.dol_escape_htmltag($obj->dolibarr_payment_code).'</span>';
@@ -117,8 +133,10 @@ if ($resql) {
         print '</td><td class="right nowrap">'.price($obj->amount).' '.dol_escape_htmltag($obj->currency).'</td><td>';
 
         $reconcileUrl = dol_buildpath('/banksync/reconcile.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.(int) $obj->rowid;
+        $returnState = $page.':'.(int) $obj->rowid;
+        $rememberReturn = "document.cookie='banksync_return=".$returnState."; path=/; max-age=1800; SameSite=Lax';";
         if ($eventType === 'bank_fee') {
-            print '<span class="badge badge-status4">'.$langs->trans('BankSyncTarget_bank_fee').'</span><br><a class="small" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncReview').'</a>';
+            print '<span class="badge badge-status4">'.$langs->trans('BankSyncTarget_bank_fee').'</span><br><a class="small" onclick="'.dol_escape_htmltag($rememberReturn).'" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncReview').'</a>';
         } elseif (!empty($obj->match_id)) {
             $targetKey = 'BankSyncTarget_'.(string) $obj->match_target_type;
             $targetLabel = $langs->trans($targetKey);
@@ -136,9 +154,9 @@ if ($resql) {
                 print '<span class="badge '.dol_escape_htmltag($cp['class']).'">'.dol_escape_htmltag($targetLabel).' — '.$confidence.'%</span>';
                 print '<br><span class="small opacitymedium">'.dol_escape_htmltag($cp['label']).'</span>';
             }
-            print '<br><a class="small" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncReview').'</a>';
+            print '<br><a class="small" onclick="'.dol_escape_htmltag($rememberReturn).'" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncReview').'</a>';
         } else {
-            print '<a href="'.$reconcileUrl.'">'.$langs->trans('BankSyncFindCandidates').'</a>';
+            print '<a onclick="'.dol_escape_htmltag($rememberReturn).'" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncFindCandidates').'</a>';
         }
         print '</td><td>';
         $sp = banksyncTransactionStatusPresentation($langs, (string) $obj->status);
