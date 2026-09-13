@@ -65,18 +65,24 @@ Notes:
   - other currencies: ±0.01 currency units
 - If the difference is within tolerance, the transaction may be considered `matched`, but the difference must remain visible as a rounding difference and must not be silently discarded.
 - The later native posting layer must preserve bank-account accuracy; rounding differences may need their own accounting/bank adjustment depending on the accountant's preferred treatment.
+- Until an accountant-approved native rounding rule exists, a non-zero tolerated rounding difference may be shown as `matched` for reconciliation purposes but must block actual native posting.
 
 ## Posting policy
 
 - No automatic native Dolibarr posting from unconfirmed suggestions.
-- Native posting should use Dolibarr business objects and payment APIs where available, not direct SQL into core payment tables.
+- Native posting must use Dolibarr business/domain APIs where available, not direct SQL writes into Dolibarr core business tables.
+- Direct SQL is allowed for BankSync-owned staging/reconciliation tables.
+- Read-only SELECTs against core tables may still be used by matching/search code where a suitable performant public API is not available, but core mutations must go through native Dolibarr objects/methods.
 - Planned native targets include:
-  - customer invoice -> `Paiement`
-  - supplier invoice -> `PaiementFourn`
-  - salary -> `PaymentSalary`
+  - customer invoice -> `Paiement::create()` + `Paiement::addPaymentToBank()`
+  - supplier invoice -> `PaiementFourn::create()` + inherited `addPaymentToBank()`
+  - salary -> `PaymentSalary` native workflow
   - social contribution / tax -> `PaymentSocialContribution` or the corresponding native workflow
-  - bank fees -> direct native bank entry where appropriate
+  - bank fees -> `Account::addline()` native bank API
 - Posting must be idempotent; an already posted BankSync transaction must not be posted twice.
+- Posting uses an explicit preview/confirm workflow. The preview is read-only and must show the bank amount/account/date/payment mode and all target allocations before any core mutation is allowed.
+- Initial invoice posting supports one native target type and one third party per bank transaction. Mixed target types or multiple third parties are blocked until a deliberate native workflow exists.
+- Credit-note posting is blocked until signed settlement components are implemented explicitly.
 
 ## UX principles
 
@@ -89,3 +95,4 @@ Notes:
 - Batch candidate scanning must preserve the current transaction-list page and active filters.
 - Transaction lists should provide numbered pagination rather than only previous/next navigation.
 - Transaction-list filtering should cover at least booking-date range, bank-event type, transaction code, counterparty, bank reference and reconciliation status.
+- Posting preview is available only when a transaction is fully reconciled (`matched`) or when the transaction is a standalone bank fee that requires no business-object reconciliation.
