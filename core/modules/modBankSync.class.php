@@ -23,7 +23,7 @@ class modBankSync extends DolibarrModules
         $this->name = preg_replace('/^mod/i', '', get_class($this));
         $this->description = 'BankSyncDescription';
         $this->descriptionlong = 'BankSyncDescriptionLong';
-        $this->version = '0.3.1';
+        $this->version = '0.3.2';
         $this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
         $this->picto = 'bank';
 
@@ -76,8 +76,6 @@ class modBankSync extends DolibarrModules
         $this->rights[$r][4] = 'import';
         $r++;
 
-        // BankSync lives inside the native Bank / Cash main menu. The first entry is
-        // a BankSync section; its child entries form the module navigation beneath it.
         $this->menu = array();
         $r = 0;
 
@@ -161,10 +159,7 @@ class modBankSync extends DolibarrModules
     public function init($options = '')
     {
         $result = $this->_load_tables('/banksync/sql/');
-        if ($result < 0) {
-            return -1;
-        }
-
+        if ($result < 0) return -1;
         $sql = array();
         return $this->_init($sql, $options);
     }
