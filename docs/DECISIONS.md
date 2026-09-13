@@ -84,3 +84,5 @@ Notes:
 - Lower-confidence candidates are visually distinguished as Strong / Possible / Weak.
 - Manual matches are shown as **Manual**, not as `0%` confidence.
 - Reconciliation pages should show a transaction-level allocation summary: bank amount, confirmed allocation, and remaining/rounding difference.
+- Reconciliation is a sequential review workflow. Opening **Find candidates / Review**, performing actions on the reconciliation page, and then using **Back to list** must restore the transaction list page and the exact transaction row the user came from instead of returning to the top of the list.
+- Batch candidate scanning must preserve the current transaction-list page.
