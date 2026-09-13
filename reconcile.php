@@ -90,7 +90,6 @@ try {
         $candidates = $matcher->refreshSuggestions($transactionId, $user->id);
     }
 
-    // Add confirmed/posted manual matches that are not part of the current automatic candidate set.
     $candidateKeys = array();
     foreach ($candidates as $candidate) {
         $candidateKeys[(string) $candidate['target_type'].':'.(int) $candidate['target_id']] = true;
@@ -238,18 +237,18 @@ if ((string) $transaction->bank_event_type !== 'bank_fee') {
 
     if ($manualRequested) {
         print '<br><div class="div-table-responsive"><table class="noborder centpercent">';
-        print '<tr class="liste_titre"><th>'.$langs->trans('Ref').'</th><th>'.$langs->trans('Label').'</th><th>'.$langs->trans('Date').'</th><th class="right">'.$langs->trans('BankSyncRemainingAmount').'</th><th class="right">'.$langs->trans('BankSyncAllocation').'</th><th class="right">'.$langs->trans('Action').'</th></tr>';
+        print '<tr class="liste_titre"><th>'.$langs->trans('Ref').'</th><th>'.$langs->trans('Label').'</th><th>'.$langs->trans('Date').'</th><th class="right">'.$langs->trans('BankSyncRemainingAmount').'</th><th class="right">'.$langs->trans('Action').'</th></tr>';
         if (empty($manualResults)) {
-            print '<tr><td colspan="6"><span class="opacitymedium">'.$langs->trans('BankSyncManualNoResults').'</span></td></tr>';
+            print '<tr><td colspan="5"><span class="opacitymedium">'.$langs->trans('BankSyncManualNoResults').'</span></td></tr>';
         } else {
             foreach ($manualResults as $result) {
                 $freeAmount = isset($allocationSummary['remaining_amount']) ? max(0, (float) $allocationSummary['remaining_amount']) : abs((float) $transaction->amount);
                 $defaultAllocation = min((float) $result['remaining_amount'], $freeAmount > 0 ? $freeAmount : (float) $result['remaining_amount']);
                 print '<tr class="oddeven"><td><a href="'.dol_buildpath((string) $result['url'], 1).'">'.dol_escape_htmltag((string) $result['ref']).'</a></td><td>'.dol_escape_htmltag((string) $result['label']).'</td><td>'.dol_escape_htmltag((string) $result['date']).'</td><td class="right nowrap">'.price($result['remaining_amount']).' '.dol_escape_htmltag((string) $transaction->currency).'</td>';
-                print '<td class="right"><form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'" class="inline-block">';
+                print '<td class="right nowrap"><form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'" class="inline-block">';
                 print '<input type="hidden" name="token" value="'.newToken().'"><input type="hidden" name="id" value="'.$transactionId.'"><input type="hidden" name="action" value="manual_confirm"><input type="hidden" name="target_type" value="'.dol_escape_htmltag((string) $result['target_type']).'"><input type="hidden" name="target_id" value="'.(int) $result['target_id'].'">';
-                print '<input class="width100 right" type="text" name="allocated_amount" value="'.dol_escape_htmltag(number_format($defaultAllocation, 2, '.', '')).'"> '.dol_escape_htmltag((string) $transaction->currency).'</td>';
-                print '<td class="right"><button type="submit" class="button button-save">'.$langs->trans('BankSyncManualAssign').'</button></form></td></tr>';
+                print '<input class="width100 right" type="text" name="allocated_amount" value="'.dol_escape_htmltag(number_format($defaultAllocation, 2, '.', '')).'"> '.dol_escape_htmltag((string) $transaction->currency).' ';
+                print '<button type="submit" class="button button-save">'.$langs->trans('BankSyncManualAssign').'</button></form></td></tr>';
             }
         }
         print '</table></div>';
