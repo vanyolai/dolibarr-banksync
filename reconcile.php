@@ -146,6 +146,10 @@ print load_fiche_titre($langs->trans('BankSyncReconciliation').' #'.$transaction
 
 print '<div class="tabsAction">';
 print '<a class="butAction" href="'.dol_buildpath('/banksync/transactions.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions">'.$langs->trans('BackToList').'</a>';
+$canPreviewPosting = ((string) $transaction->bank_event_type === 'bank_fee' || in_array((string) $transaction->status, array('matched', 'posted'), true));
+if ($canPreviewPosting) {
+    print '<a class="butAction" href="'.dol_buildpath('/banksync/posting.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.$transactionId.'">'.$langs->trans('BankSyncOpenPostingPreview').'</a>';
+}
 if ($user->hasRight('banksync', 'import') && (string) $transaction->bank_event_type !== 'bank_fee') {
     print '<form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'" class="inline-block">';
     print '<input type="hidden" name="token" value="'.newToken().'">';
