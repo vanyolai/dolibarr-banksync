@@ -2,7 +2,7 @@
 
 BankSync is a Dolibarr external module for importing, classifying and reconciling bank transactions from multiple data sources through a provider-neutral staging layer.
 
-## Current status: 0.2.0
+## Current status: 0.3.0
 
 The first provider is **BinX CSV**. The module currently:
 
@@ -16,9 +16,14 @@ The first provider is **BinX CSV**. The module currently:
 - discovers provider source accounts and maps them explicitly to native Dolibarr bank accounts;
 - proposes exact account-number/IBAN matches but requires manual confirmation before posting;
 - classifies bank events separately from reconciliation targets (`transfer`, `card`, `direct_debit`, `bank_fee`, `cash`, `conversion`, etc.);
-- maps compatible bank event types to native Dolibarr payment codes such as `VIR`, `CB`, `PRE` and `LIQ`;
-- provides a generic N:N reconciliation model for future links to customer invoices, supplier invoices, salaries, social contributions, taxes and other Dolibarr objects;
-- provides a dashboard, source-account mapping page, import page, and staged transaction list;
+- maps known BinX codes (`CDPT`, `DMCT`, `CAPA`, `CHRG`, `PPCF`) to provider-neutral event types and compatible native Dolibarr payment codes;
+- searches native Dolibarr customer invoices, supplier invoices, salaries and social-contribution/tax entries for reconciliation candidates;
+- scores candidates using amount, document reference, counterparty bank account, normalized name and date proximity;
+- keeps card transactions from using BinX card identifiers as partner bank-account evidence;
+- stores suggestions and human decisions in a generic N:N reconciliation model;
+- preserves confirmed/rejected decisions when candidates are recalculated;
+- provides a transaction-level reconciliation review page with confirm/reject actions;
+- provides a dashboard, source-account mapping page, import page, staged transaction list and bulk candidate scan;
 - **does not yet create native Dolibarr payment/bank records automatically**.
 
 This staging-first design intentionally separates ingestion, bank-event classification, reconciliation and posting. Future providers (Wise API, CAMT.053, MT940, other CSV formats or AISP APIs) can feed the same normalized model.
@@ -145,7 +150,17 @@ refund
 other
 ```
 
-For BinX, `CHRG` is classified as `bank_fee`, while `DMCT` is currently classified as `transfer` and mapped to Dolibarr payment code `VIR`.
+Current exact BinX mappings are:
+
+```text
+CDPT -> transfer -> VIR
+DMCT -> transfer -> VIR
+CAPA -> card     -> CB
+CHRG -> bank_fee
+PPCF -> bank_fee
+```
+
+Exact provider codes take precedence over heuristic text classification.
 
 ## Reconciliation model
 
@@ -163,7 +178,16 @@ internal_transfer
 other
 ```
 
-This allows one payment to settle multiple invoices and supports partial payments without coupling provider-specific structures to Dolibarr business objects.
+The 0.3.0 candidate matcher currently searches:
+
+- incoming transfers against open customer invoices;
+- outgoing transfers, cards and direct debits against open supplier invoices;
+- outgoing transfers against unpaid salary records;
+- outgoing transfers against unpaid `ChargeSociales` tax/social-contribution records.
+
+Candidate confidence is calculated from independent signals such as exact/near amount, invoice reference in the bank reference, partner bank-account match, normalized partner/employee name and date proximity. Suggestions are advisory and require explicit confirmation. Confirming a candidate changes only BankSync reconciliation state (`new` -> `matched`); it does not yet create or alter a native Dolibarr payment.
+
+This model allows one payment to settle multiple invoices and supports partial payments without coupling provider-specific structures to Dolibarr business objects.
 
 ## Deduplication model
 
@@ -199,7 +223,9 @@ MT940 ──────────┘              │
                         BankSync staging
                                │
                                ▼
-                      reconciliation matches
+                  scored reconciliation candidates
+                               │
+                         human confirmation
                                │
                                ▼
                   native Dolibarr payment/posting
@@ -219,14 +245,15 @@ php tests/classifier_smoke.php
 
 ## Roadmap
 
-1. Add automatic/manual matching for customer and supplier invoices, including split and partial allocations.
-2. Add native payment posting through `Paiement` / `PaiementFourn` and mark fully settled invoices paid.
-3. Add salary reconciliation through `PaymentSalary`.
-4. Add social-contribution/tax reconciliation through `PaymentSocialContribution` and related Dolibarr objects.
-5. Add controlled posting for bank fees, internal transfers and unmatched generic bank entries.
-6. Add review/approval workflow and posting idempotency.
-7. Add a Wise API provider.
-8. Add CAMT.053 / MT940 statement providers.
+1. Validate and tune candidate scoring against real BinX transactions and Dolibarr objects.
+2. Add editable split/partial allocations so one bank transaction can confirm multiple invoice targets safely.
+3. Add native customer/supplier invoice posting through `Paiement` / `PaiementFourn` and mark fully settled invoices paid.
+4. Add native salary posting through `PaymentSalary`.
+5. Add native social-contribution/tax posting through `PaymentSocialContribution` / `ChargeSociales`.
+6. Add controlled posting for bank fees, internal transfers and unmatched generic bank entries.
+7. Add posting idempotency and audit/reversal workflow.
+8. Add a Wise API provider.
+9. Add CAMT.053 / MT940 statement providers.
 
 ## License
 
