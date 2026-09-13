@@ -62,6 +62,68 @@ function banksyncListUrl($page, array $filters)
     return dol_buildpath('/banksync/transactions.php', 1).'?'.http_build_query($params);
 }
 
+function banksyncListConfidencePresentation($langs, $confidence)
+{
+    $confidence = (int) $confidence;
+    if ($confidence >= 100) return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncConfidenceCertain'));
+    if ($confidence >= 80) return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidenceStrong'));
+    if ($confidence >= 60) return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidencePossible'));
+    return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncConfidenceWeak'));
+}
+
+function banksyncTransactionStatusPresentation($langs, $status)
+{
+    switch ((string) $status) {
+        case 'matched': return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncTransactionStatus_matched'));
+        case 'partially_matched': return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncTransactionStatus_partially_matched'));
+        case 'posted': return array('class' => 'badge-status6', 'label' => $langs->trans('BankSyncTransactionStatus_posted'));
+        case 'ignored': return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncTransactionStatus_ignored'));
+        case 'error': return array('class' => 'badge-status8', 'label' => $langs->trans('BankSyncTransactionStatus_error'));
+        default: return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncTransactionStatus_new'));
+    }
+}
+
+function banksyncCompactPagination($langs, $page, $totalPages, $totalRows, array $filters)
+{
+    if ($totalRows <= 0 || $totalPages <= 1) return '';
+
+    $html = '<div class="center" style="margin:12px 0 4px 0;white-space:nowrap">';
+    $itemStyle = 'display:inline-block;min-width:22px;padding:3px 6px;margin:0 1px;text-align:center;text-decoration:none;border-radius:3px;';
+    $linkStyle = $itemStyle.'border:1px solid transparent;';
+    $currentStyle = $itemStyle.'border:1px solid #bbb;background:rgba(128,128,128,.12);font-weight:bold;';
+
+    if ($page > 0) {
+        $html .= '<a title="'.dol_escape_htmltag($langs->trans('Previous')).'" style="'.$linkStyle.'" href="'.dol_escape_htmltag(banksyncListUrl($page - 1, $filters)).'">&#8249;</a>';
+    } else {
+        $html .= '<span class="opacitymedium" style="'.$linkStyle.'">&#8249;</span>';
+    }
+
+    $windowStart = max(0, $page - 2);
+    $windowEnd = min($totalPages - 1, $page + 2);
+    if ($windowStart > 0) {
+        $html .= '<a style="'.$linkStyle.'" href="'.dol_escape_htmltag(banksyncListUrl(0, $filters)).'">1</a>';
+        if ($windowStart > 1) $html .= '<span class="opacitymedium" style="'.$itemStyle.'">…</span>';
+    }
+    for ($p = $windowStart; $p <= $windowEnd; $p++) {
+        if ($p === $page) $html .= '<span style="'.$currentStyle.'">'.($p + 1).'</span>';
+        else $html .= '<a style="'.$linkStyle.'" href="'.dol_escape_htmltag(banksyncListUrl($p, $filters)).'">'.($p + 1).'</a>';
+    }
+    if ($windowEnd < $totalPages - 1) {
+        if ($windowEnd < $totalPages - 2) $html .= '<span class="opacitymedium" style="'.$itemStyle.'">…</span>';
+        $html .= '<a style="'.$linkStyle.'" href="'.dol_escape_htmltag(banksyncListUrl($totalPages - 1, $filters)).'">'.$totalPages.'</a>';
+    }
+
+    if ($page < $totalPages - 1) {
+        $html .= '<a title="'.dol_escape_htmltag($langs->trans('Next')).'" style="'.$linkStyle.'" href="'.dol_escape_htmltag(banksyncListUrl($page + 1, $filters)).'">&#8250;</a>';
+    } else {
+        $html .= '<span class="opacitymedium" style="'.$linkStyle.'">&#8250;</span>';
+    }
+
+    $html .= '<span class="opacitymedium small" style="margin-left:8px">'.$langs->trans('BankSyncTransactionCount', $totalRows).'</span>';
+    $html .= '</div>';
+    return $html;
+}
+
 // Reconciliation pages return to transactions.php without list-state parameters.
 // A short-lived one-shot cookie restores page, active filters and row anchor.
 if (!isset($_GET['page']) && !isset($_POST['page']) && !empty($_COOKIE['banksync_return'])) {
@@ -105,27 +167,6 @@ if ($action === 'scan_candidates') {
         setEventMessages($langs->trans('BankSyncTransactionsScanned', $scanned), null, 'mesgs');
     } catch (Exception $e) {
         setEventMessages($langs->trans('BankSyncCandidateSearchFailed', $e->getMessage()), null, 'errors');
-    }
-}
-
-function banksyncListConfidencePresentation($langs, $confidence)
-{
-    $confidence = (int) $confidence;
-    if ($confidence >= 100) return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncConfidenceCertain'));
-    if ($confidence >= 80) return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidenceStrong'));
-    if ($confidence >= 60) return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidencePossible'));
-    return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncConfidenceWeak'));
-}
-
-function banksyncTransactionStatusPresentation($langs, $status)
-{
-    switch ((string) $status) {
-        case 'matched': return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncTransactionStatus_matched'));
-        case 'partially_matched': return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncTransactionStatus_partially_matched'));
-        case 'posted': return array('class' => 'badge-status6', 'label' => $langs->trans('BankSyncTransactionStatus_posted'));
-        case 'ignored': return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncTransactionStatus_ignored'));
-        case 'error': return array('class' => 'badge-status8', 'label' => $langs->trans('BankSyncTransactionStatus_error'));
-        default: return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncTransactionStatus_new'));
     }
 }
 
@@ -181,7 +222,7 @@ if ($user->hasRight('banksync', 'import')) {
 
 print '<form method="GET" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
 print '<input type="hidden" name="mainmenu" value="bank"><input type="hidden" name="leftmenu" value="banksync_transactions">';
-print '<div class="div-table-responsive"><table class="noborder centpercent">';
+print '<table class="noborder centpercent" style="margin-bottom:12px">';
 print '<tr class="liste_titre"><th colspan="8">'.$langs->trans('BankSyncFilters').'</th></tr>';
 print '<tr class="oddeven">';
 print '<td><label>'.$langs->trans('BankSyncDateFrom').'<br><input type="date" name="filter_date_from" value="'.dol_escape_htmltag(isset($filters['filter_date_from']) ? $filters['filter_date_from'] : '').'"></label></td>';
@@ -202,7 +243,9 @@ foreach (banksyncAllowedStatuses() as $status) {
 }
 print '</select></label></td>';
 print '<td class="right valignbottom nowrap"><button type="submit" class="button">'.$langs->trans('BankSyncApplyFilters').'</button> <a class="button" href="'.dol_buildpath('/banksync/transactions.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions">'.$langs->trans('BankSyncClearFilters').'</a></td>';
-print '</tr></table></div></form><br>';
+print '</tr></table></form>';
+
+print banksyncCompactPagination($langs, $page, $totalPages, $totalRows, $filters);
 
 print '<div class="div-table-responsive"><table class="noborder centpercent">';
 print '<tr class="liste_titre"><th>'.$langs->trans('BankSyncBookingDate').'</th><th>'.$langs->trans('BankSyncBankEventType').'</th><th>'.$langs->trans('BankSyncTransactionCode').'</th><th>'.$langs->trans('BankSyncCounterparty').'</th><th>'.$langs->trans('BankSyncReference').'</th><th>'.$langs->trans('BankSyncDolibarrBankAccount').'</th><th class="right">'.$langs->trans('Amount').'</th><th>'.$langs->trans('BankSyncReconciliation').'</th><th>'.$langs->trans('Status').'</th></tr>';
@@ -267,29 +310,7 @@ if ($resql) {
 if ($num === 0) print '<tr><td colspan="9"><span class="opacitymedium">'.$langs->trans('BankSyncNoTransactions').'</span></td></tr>';
 print '</table></div>';
 
-if ($totalRows > 0) {
-    print '<div class="pagination">';
-    if ($page > 0) print '<a class="button" href="'.dol_escape_htmltag(banksyncListUrl($page - 1, $filters)).'">&laquo; '.$langs->trans('Previous').'</a> ';
-
-    $windowStart = max(0, $page - 2);
-    $windowEnd = min($totalPages - 1, $page + 2);
-    if ($windowStart > 0) {
-        print '<a class="button" href="'.dol_escape_htmltag(banksyncListUrl(0, $filters)).'">1</a> ';
-        if ($windowStart > 1) print '<span class="opacitymedium">…</span> ';
-    }
-    for ($p = $windowStart; $p <= $windowEnd; $p++) {
-        if ($p === $page) print '<span class="button disabled">'.($p + 1).'</span> ';
-        else print '<a class="button" href="'.dol_escape_htmltag(banksyncListUrl($p, $filters)).'">'.($p + 1).'</a> ';
-    }
-    if ($windowEnd < $totalPages - 1) {
-        if ($windowEnd < $totalPages - 2) print '<span class="opacitymedium">…</span> ';
-        print '<a class="button" href="'.dol_escape_htmltag(banksyncListUrl($totalPages - 1, $filters)).'">'.$totalPages.'</a> ';
-    }
-
-    if ($page < $totalPages - 1) print '<a class="button" href="'.dol_escape_htmltag(banksyncListUrl($page + 1, $filters)).'">'.$langs->trans('Next').' &raquo;</a>';
-    print '<span class="opacitymedium small"> '.$langs->trans('BankSyncTransactionCount', $totalRows).'</span>';
-    print '</div>';
-}
+print banksyncCompactPagination($langs, $page, $totalPages, $totalRows, $filters);
 
 llxFooter();
 $db->close();
