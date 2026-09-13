@@ -29,9 +29,9 @@ print dol_get_fiche_head($head, 'settings', $langs->trans('BankSync'), -1, 'bank
 print '<div class="opacitymedium">'.$langs->trans('BankSyncSetupHelp').'</div><br>';
 print '<table class="noborder centpercent">';
 print '<tr class="liste_titre"><th>'.$langs->trans('Parameter').'</th><th>'.$langs->trans('Value').'</th></tr>';
-print '<tr class="oddeven"><td>'.$langs->trans('BankSyncVersion').'</td><td>0.3.6</td></tr>';
+print '<tr class="oddeven"><td>'.$langs->trans('BankSyncVersion').'</td><td>0.4.0</td></tr>';
 print '<tr class="oddeven"><td>'.$langs->trans('BankSyncAvailableProviders').'</td><td>BinX CSV</td></tr>';
-print '<tr class="oddeven"><td>'.$langs->trans('BankSyncPostingMode').'</td><td>'.$langs->trans('BankSyncStagingOnly').'</td></tr>';
+print '<tr class="oddeven"><td>'.$langs->trans('BankSyncPostingMode').'</td><td>'.$langs->trans('BankSyncStagingOnly').' + '.$langs->trans('BankSyncPostingPreview').'</td></tr>';
 print '</table>';
 
 print dol_get_fiche_end();
