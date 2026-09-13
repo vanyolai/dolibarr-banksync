@@ -5,30 +5,17 @@ $res = 0;
 if (!$res && !empty($_SERVER['CONTEXT_DOCUMENT_ROOT'])) {
     $res = @include str_replace('..', '', $_SERVER['CONTEXT_DOCUMENT_ROOT']).'/main.inc.php';
 }
-if (!$res && file_exists('../main.inc.php')) {
-    $res = @include '../main.inc.php';
-}
-if (!$res && file_exists('../../main.inc.php')) {
-    $res = @include '../../main.inc.php';
-}
-if (!$res && file_exists('../../../main.inc.php')) {
-    $res = @include '../../../main.inc.php';
-}
-if (!$res) {
-    die('Include of main fails');
-}
+if (!$res && file_exists('../main.inc.php')) $res = @include '../main.inc.php';
+if (!$res && file_exists('../../main.inc.php')) $res = @include '../../main.inc.php';
+if (!$res && file_exists('../../../main.inc.php')) $res = @include '../../../main.inc.php';
+if (!$res) die('Include of main fails');
 
 require_once __DIR__.'/class/banksyncschema.class.php';
 require_once __DIR__.'/class/banksynccandidatematcher.class.php';
 
 $langs->load('banksync@banksync');
-
-if (!isModEnabled('banksync')) {
-    accessforbidden('BankSync module is not enabled.');
-}
-if (!$user->hasRight('banksync', 'read')) {
-    accessforbidden();
-}
+if (!isModEnabled('banksync')) accessforbidden('BankSync module is not enabled.');
+if (!$user->hasRight('banksync', 'read')) accessforbidden();
 
 try {
     BankSyncSchema::ensure($db);
@@ -43,9 +30,7 @@ $entity = (int) $conf->entity;
 $action = GETPOST('action', 'aZ09');
 
 if ($action === 'scan_candidates') {
-    if (!$user->hasRight('banksync', 'import')) {
-        accessforbidden();
-    }
+    if (!$user->hasRight('banksync', 'import')) accessforbidden();
     try {
         $matcher = new BankSyncCandidateMatcher($db, $entity);
         $scanned = $matcher->refreshOpenTransactions($user->id, 100);
@@ -58,16 +43,22 @@ if ($action === 'scan_candidates') {
 function banksyncListConfidencePresentation($langs, $confidence)
 {
     $confidence = (int) $confidence;
-    if ($confidence >= 100) {
-        return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncConfidenceCertain'));
-    }
-    if ($confidence >= 80) {
-        return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidenceStrong'));
-    }
-    if ($confidence >= 60) {
-        return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidencePossible'));
-    }
+    if ($confidence >= 100) return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncConfidenceCertain'));
+    if ($confidence >= 80) return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidenceStrong'));
+    if ($confidence >= 60) return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidencePossible'));
     return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncConfidenceWeak'));
+}
+
+function banksyncTransactionStatusPresentation($langs, $status)
+{
+    switch ((string) $status) {
+        case 'matched': return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncTransactionStatus_matched'));
+        case 'partially_matched': return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncTransactionStatus_partially_matched'));
+        case 'posted': return array('class' => 'badge-status6', 'label' => $langs->trans('BankSyncTransactionStatus_posted'));
+        case 'ignored': return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncTransactionStatus_ignored'));
+        case 'error': return array('class' => 'badge-status8', 'label' => $langs->trans('BankSyncTransactionStatus_error'));
+        default: return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncTransactionStatus_new'));
+    }
 }
 
 $sql = 'SELECT t.rowid, t.booking_date, t.value_date, t.direction, t.amount, t.currency, t.transaction_type, t.transaction_code,';
@@ -75,7 +66,7 @@ $sql .= ' t.counterparty_name, t.counterparty_account, t.reference, t.external_t
 $sql .= ' t.bank_event_type, t.dolibarr_payment_code, t.classification_confidence, t.classification_method, t.fk_bank,';
 $sql .= ' a.source_account_number, a.mapping_status, a.fk_bank_account,';
 $sql .= ' ba.label AS bank_account_label, ba.ref AS bank_account_ref,';
-$sql .= ' bm.rowid AS match_id, bm.target_type AS match_target_type, bm.confidence AS match_confidence, bm.status AS match_status';
+$sql .= ' bm.rowid AS match_id, bm.target_type AS match_target_type, bm.confidence AS match_confidence, bm.status AS match_status, bm.match_method AS match_method';
 $sql .= ' FROM '.$db->prefix().'banksync_transaction AS t';
 $sql .= ' LEFT JOIN '.$db->prefix().'banksync_account AS a ON a.rowid = t.fk_banksync_account';
 $sql .= ' LEFT JOIN '.$db->prefix().'bank_account AS ba ON ba.rowid = a.fk_bank_account';
@@ -93,119 +84,74 @@ llxHeader('', $langs->trans('BankSyncTransactions'));
 print load_fiche_titre($langs->trans('BankSyncTransactions'), '', 'bank');
 
 if ($user->hasRight('banksync', 'import')) {
-    print '<div class="tabsAction">';
-    print '<form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions" class="inline-block">';
-    print '<input type="hidden" name="token" value="'.newToken().'">';
-    print '<input type="hidden" name="action" value="scan_candidates">';
-    print '<button type="submit" class="butAction">'.$langs->trans('BankSyncScanCandidates').'</button>';
-    print '</form>';
-    print '</div>';
+    print '<div class="tabsAction"><form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions" class="inline-block">';
+    print '<input type="hidden" name="token" value="'.newToken().'"><input type="hidden" name="action" value="scan_candidates">';
+    print '<button type="submit" class="butAction">'.$langs->trans('BankSyncScanCandidates').'</button></form></div>';
 }
 
-print '<div class="div-table-responsive">';
-print '<table class="noborder centpercent">';
-print '<tr class="liste_titre">';
-print '<th>'.$langs->trans('BankSyncBookingDate').'</th>';
-print '<th>'.$langs->trans('BankSyncBankEventType').'</th>';
-print '<th>'.$langs->trans('BankSyncTransactionCode').'</th>';
-print '<th>'.$langs->trans('BankSyncCounterparty').'</th>';
-print '<th>'.$langs->trans('BankSyncReference').'</th>';
-print '<th>'.$langs->trans('BankSyncDolibarrBankAccount').'</th>';
-print '<th class="right">'.$langs->trans('Amount').'</th>';
-print '<th>'.$langs->trans('BankSyncReconciliation').'</th>';
-print '<th>'.$langs->trans('Status').'</th>';
-print '</tr>';
+print '<div class="div-table-responsive"><table class="noborder centpercent">';
+print '<tr class="liste_titre"><th>'.$langs->trans('BankSyncBookingDate').'</th><th>'.$langs->trans('BankSyncBankEventType').'</th><th>'.$langs->trans('BankSyncTransactionCode').'</th><th>'.$langs->trans('BankSyncCounterparty').'</th><th>'.$langs->trans('BankSyncReference').'</th><th>'.$langs->trans('BankSyncDolibarrBankAccount').'</th><th class="right">'.$langs->trans('Amount').'</th><th>'.$langs->trans('BankSyncReconciliation').'</th><th>'.$langs->trans('Status').'</th></tr>';
 
 $num = 0;
 $hasMore = false;
 if ($resql) {
     while ($obj = $db->fetch_object($resql)) {
-        if ($num >= $limit) {
-            $hasMore = true;
-            break;
-        }
+        if ($num >= $limit) { $hasMore = true; break; }
         $num++;
-
-        print '<tr class="oddeven">';
-        print '<td>'.dol_escape_htmltag((string) $obj->booking_date).'</td>';
-        print '<td>';
+        print '<tr class="oddeven"><td>'.dol_escape_htmltag((string) $obj->booking_date).'</td><td>';
         $eventType = !empty($obj->bank_event_type) ? $obj->bank_event_type : 'other';
         print dol_escape_htmltag($langs->trans('BankSyncEventType_'.$eventType));
-        if (!empty($obj->dolibarr_payment_code)) {
-            print '<br><span class="opacitymedium small">'.dol_escape_htmltag($obj->dolibarr_payment_code).'</span>';
-        }
-        print '</td>';
-        print '<td title="'.dol_escape_htmltag($obj->transaction_type).'">'.dol_escape_htmltag($obj->transaction_code).'</td>';
+        if (!empty($obj->dolibarr_payment_code)) print '<br><span class="opacitymedium small">'.dol_escape_htmltag($obj->dolibarr_payment_code).'</span>';
+        print '</td><td title="'.dol_escape_htmltag($obj->transaction_type).'">'.dol_escape_htmltag($obj->transaction_code).'</td>';
         print '<td>'.dol_escape_htmltag($obj->counterparty_name);
-        if (!empty($obj->counterparty_account)) {
-            print '<br><span class="opacitymedium small">'.dol_escape_htmltag($obj->counterparty_account).'</span>';
-        }
-        print '</td>';
-        print '<td>'.dol_escape_htmltag($obj->reference).'</td>';
-        print '<td>';
+        if (!empty($obj->counterparty_account)) print '<br><span class="opacitymedium small">'.dol_escape_htmltag($obj->counterparty_account).'</span>';
+        print '</td><td>'.dol_escape_htmltag($obj->reference).'</td><td>';
         if (!empty($obj->fk_bank_account)) {
             $bankLabel = trim((string) $obj->bank_account_label);
-            if ($bankLabel === '') {
-                $bankLabel = trim((string) $obj->bank_account_ref);
-            }
+            if ($bankLabel === '') $bankLabel = trim((string) $obj->bank_account_ref);
             print dol_escape_htmltag($bankLabel);
         } else {
             print '<a href="'.dol_buildpath('/banksync/accounts.php', 1).'?mainmenu=bank&leftmenu=banksync_accounts" class="error">'.$langs->trans('BankSyncUnmapped').'</a>';
         }
-        if (!empty($obj->source_account_number)) {
-            print '<br><span class="opacitymedium small">'.dol_escape_htmltag($obj->source_account_number).'</span>';
-        }
-        print '</td>';
-        print '<td class="right nowrap">'.price($obj->amount).' '.dol_escape_htmltag($obj->currency).'</td>';
+        if (!empty($obj->source_account_number)) print '<br><span class="opacitymedium small">'.dol_escape_htmltag($obj->source_account_number).'</span>';
+        print '</td><td class="right nowrap">'.price($obj->amount).' '.dol_escape_htmltag($obj->currency).'</td><td>';
 
-        print '<td>';
-        $reconcileUrl = dol_buildpath('/banksync/reconcile.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.((int) $obj->rowid);
+        $reconcileUrl = dol_buildpath('/banksync/reconcile.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.(int) $obj->rowid;
         if ($eventType === 'bank_fee') {
-            print '<span class="badge badge-status4">'.$langs->trans('BankSyncTarget_bank_fee').'</span>';
-            print '<br><a class="small" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncReview').'</a>';
+            print '<span class="badge badge-status4">'.$langs->trans('BankSyncTarget_bank_fee').'</span><br><a class="small" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncReview').'</a>';
         } elseif (!empty($obj->match_id)) {
             $targetKey = 'BankSyncTarget_'.(string) $obj->match_target_type;
             $targetLabel = $langs->trans($targetKey);
-            if ($targetLabel === $targetKey) {
-                $targetLabel = (string) $obj->match_target_type;
-            }
+            if ($targetLabel === $targetKey) $targetLabel = (string) $obj->match_target_type;
             $confidence = (int) $obj->match_confidence;
-            $confidencePresentation = banksyncListConfidencePresentation($langs, $confidence);
+            $cp = banksyncListConfidencePresentation($langs, $confidence);
+            $manual = ((string) $obj->match_method === 'manual');
             if ((string) $obj->match_status === 'confirmed') {
-                print '<span class="badge badge-status4">'.dol_escape_htmltag($targetLabel).' — '.$confidence.'%</span>';
+                print '<span class="badge badge-status4">'.dol_escape_htmltag($targetLabel).' — '.($manual ? $langs->trans('BankSyncManual') : $confidence.'%').'</span>';
                 print '<br><span class="small opacitymedium">'.$langs->trans('BankSyncMatchConfirmedStatus').'</span>';
             } elseif ((string) $obj->match_status === 'posted') {
-                print '<span class="badge badge-status6">'.dol_escape_htmltag($targetLabel).' — '.$confidence.'%</span>';
+                print '<span class="badge badge-status6">'.dol_escape_htmltag($targetLabel).' — '.($manual ? $langs->trans('BankSyncManual') : $confidence.'%').'</span>';
                 print '<br><span class="small opacitymedium">'.$langs->trans('BankSyncMatchPostedStatus').'</span>';
             } else {
-                print '<span class="badge '.dol_escape_htmltag($confidencePresentation['class']).'">'.dol_escape_htmltag($targetLabel).' — '.$confidence.'%</span>';
-                print '<br><span class="small opacitymedium">'.dol_escape_htmltag($confidencePresentation['label']).'</span>';
+                print '<span class="badge '.dol_escape_htmltag($cp['class']).'">'.dol_escape_htmltag($targetLabel).' — '.$confidence.'%</span>';
+                print '<br><span class="small opacitymedium">'.dol_escape_htmltag($cp['label']).'</span>';
             }
             print '<br><a class="small" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncReview').'</a>';
         } else {
             print '<a href="'.$reconcileUrl.'">'.$langs->trans('BankSyncFindCandidates').'</a>';
         }
-        print '</td>';
-
-        print '<td>'.dol_escape_htmltag($obj->status).'</td>';
-        print '</tr>';
+        print '</td><td>';
+        $sp = banksyncTransactionStatusPresentation($langs, (string) $obj->status);
+        print '<span class="badge '.dol_escape_htmltag($sp['class']).'">'.dol_escape_htmltag($sp['label']).'</span>';
+        print '</td></tr>';
     }
     $db->free($resql);
 }
 
-if ($num === 0) {
-    print '<tr><td colspan="9"><span class="opacitymedium">'.$langs->trans('BankSyncNoTransactions').'</span></td></tr>';
-}
-print '</table>';
-print '</div>';
-
-print '<div class="pagination">';
-if ($page > 0) {
-    print '<a class="button" href="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions&page='.($page - 1).'">&laquo; '.$langs->trans('Previous').'</a> ';
-}
-if ($hasMore) {
-    print '<a class="button" href="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions&page='.($page + 1).'">'.$langs->trans('Next').' &raquo;</a>';
-}
+if ($num === 0) print '<tr><td colspan="9"><span class="opacitymedium">'.$langs->trans('BankSyncNoTransactions').'</span></td></tr>';
+print '</table></div><div class="pagination">';
+if ($page > 0) print '<a class="button" href="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions&page='.($page - 1).'">&laquo; '.$langs->trans('Previous').'</a> ';
+if ($hasMore) print '<a class="button" href="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions&page='.($page + 1).'">'.$langs->trans('Next').' &raquo;</a>';
 print '</div>';
 
 llxFooter();
