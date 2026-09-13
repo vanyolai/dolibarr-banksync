@@ -172,9 +172,16 @@ if (!empty($allocationSummary) && (string) $transaction->bank_event_type !== 'ba
     print '<table class="border centpercent">';
     print '<tr><td class="titlefield">'.$langs->trans('BankSyncBankAmount').'</td><td>'.price($allocationSummary['target_amount']).' '.dol_escape_htmltag($allocationSummary['currency']).'</td></tr>';
     print '<tr><td>'.$langs->trans('BankSyncAllocatedAmount').'</td><td>'.price($allocationSummary['allocated_amount']).' '.dol_escape_htmltag($allocationSummary['currency']).'</td></tr>';
-    $remainingClass = !empty($allocationSummary['balanced']) ? 'badge-status4' : 'badge-status1';
-    $remainingLabel = !empty($allocationSummary['balanced']) ? $langs->trans('BankSyncFullyAllocated') : $langs->trans('BankSyncRemainingToAllocate');
-    print '<tr><td>'.$langs->trans('BankSyncAllocationDifference').'</td><td><span class="badge '.$remainingClass.'">'.dol_escape_htmltag($remainingLabel).'</span> '.price($allocationSummary['remaining_amount']).' '.dol_escape_htmltag($allocationSummary['currency']).'</td></tr>';
+    print '<tr><td>'.$langs->trans('BankSyncAllocationDifference').'</td><td>';
+    if (!empty($allocationSummary['balanced'])) {
+        print '<span class="badge badge-status4">'.$langs->trans('BankSyncTransactionStatus_matched').'</span>';
+        if (abs((float) $allocationSummary['rounding_difference']) > 0.00001) {
+            print ' <span class="opacitymedium">'.$langs->trans('BankSyncRoundingDifference').':</span> '.price(abs((float) $allocationSummary['rounding_difference'])).' '.dol_escape_htmltag($allocationSummary['currency']);
+        }
+    } else {
+        print '<span class="badge badge-status1">'.$langs->trans('BankSyncRemainingToAllocate').'</span> '.price($allocationSummary['remaining_amount']).' '.dol_escape_htmltag($allocationSummary['currency']);
+    }
+    print '</td></tr>';
     print '</table>';
 }
 
