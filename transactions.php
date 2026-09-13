@@ -55,6 +55,21 @@ if ($action === 'scan_candidates') {
     }
 }
 
+function banksyncListConfidencePresentation($langs, $confidence)
+{
+    $confidence = (int) $confidence;
+    if ($confidence >= 100) {
+        return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncConfidenceCertain'));
+    }
+    if ($confidence >= 80) {
+        return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidenceStrong'));
+    }
+    if ($confidence >= 60) {
+        return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidencePossible'));
+    }
+    return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncConfidenceWeak'));
+}
+
 $sql = 'SELECT t.rowid, t.booking_date, t.value_date, t.direction, t.amount, t.currency, t.transaction_type, t.transaction_code,';
 $sql .= ' t.counterparty_name, t.counterparty_account, t.reference, t.external_transaction_id, t.status, t.fk_import,';
 $sql .= ' t.bank_event_type, t.dolibarr_payment_code, t.classification_confidence, t.classification_method, t.fk_bank,';
@@ -154,12 +169,17 @@ if ($resql) {
             if ($targetLabel === $targetKey) {
                 $targetLabel = (string) $obj->match_target_type;
             }
+            $confidence = (int) $obj->match_confidence;
+            $confidencePresentation = banksyncListConfidencePresentation($langs, $confidence);
             if ((string) $obj->match_status === 'confirmed') {
-                print '<span class="badge badge-status4">'.dol_escape_htmltag($targetLabel).' — '.((int) $obj->match_confidence).'%</span>';
+                print '<span class="badge badge-status4">'.dol_escape_htmltag($targetLabel).' — '.$confidence.'%</span>';
+                print '<br><span class="small opacitymedium">'.$langs->trans('BankSyncMatchConfirmedStatus').'</span>';
             } elseif ((string) $obj->match_status === 'posted') {
-                print '<span class="badge badge-status6">'.dol_escape_htmltag($targetLabel).' — '.((int) $obj->match_confidence).'%</span>';
+                print '<span class="badge badge-status6">'.dol_escape_htmltag($targetLabel).' — '.$confidence.'%</span>';
+                print '<br><span class="small opacitymedium">'.$langs->trans('BankSyncMatchPostedStatus').'</span>';
             } else {
-                print '<span class="badge badge-status1">'.dol_escape_htmltag($targetLabel).' — '.((int) $obj->match_confidence).'%</span>';
+                print '<span class="badge '.dol_escape_htmltag($confidencePresentation['class']).'">'.dol_escape_htmltag($targetLabel).' — '.$confidence.'%</span>';
+                print '<br><span class="small opacitymedium">'.dol_escape_htmltag($confidencePresentation['label']).'</span>';
             }
             print '<br><a class="small" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncReview').'</a>';
         } else {
