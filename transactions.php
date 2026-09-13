@@ -23,16 +23,59 @@ try {
     setEventMessages($langs->trans('BankSyncSchemaMigrationFailed', $e->getMessage()), null, 'errors');
 }
 
+function banksyncAllowedEventTypes()
+{
+    return array('transfer', 'card', 'direct_debit', 'bank_fee', 'cash', 'conversion', 'internal_transfer', 'refund', 'other');
+}
+
+function banksyncAllowedStatuses()
+{
+    return array('new', 'partially_matched', 'matched', 'posted', 'ignored', 'error');
+}
+
+function banksyncFilterKeys()
+{
+    return array('filter_date_from', 'filter_date_to', 'filter_event_type', 'filter_code', 'filter_counterparty', 'filter_reference', 'filter_status');
+}
+
+function banksyncNormalizeReturnFilters($filters)
+{
+    $clean = array();
+    if (!is_array($filters)) return $clean;
+    foreach (banksyncFilterKeys() as $key) {
+        if (!isset($filters[$key])) continue;
+        $value = trim((string) $filters[$key]);
+        if ($value === '') continue;
+        if (($key === 'filter_date_from' || $key === 'filter_date_to') && !preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) continue;
+        if ($key === 'filter_event_type' && !in_array($value, banksyncAllowedEventTypes(), true)) continue;
+        if ($key === 'filter_status' && !in_array($value, banksyncAllowedStatuses(), true)) continue;
+        $clean[$key] = substr($value, 0, 120);
+    }
+    return $clean;
+}
+
+function banksyncListUrl($page, array $filters)
+{
+    $params = array('mainmenu' => 'bank', 'leftmenu' => 'banksync_transactions');
+    if ((int) $page > 0) $params['page'] = (int) $page;
+    foreach (banksyncNormalizeReturnFilters($filters) as $key => $value) $params[$key] = $value;
+    return dol_buildpath('/banksync/transactions.php', 1).'?'.http_build_query($params);
+}
+
 // Reconciliation pages return to transactions.php without list-state parameters.
-// A short-lived one-shot cookie set by the clicked row lets us restore the exact
-// page and row anchor without coupling reconcile.php to list pagination details.
+// A short-lived one-shot cookie restores page, active filters and row anchor.
 if (!isset($_GET['page']) && !isset($_POST['page']) && !empty($_COOKIE['banksync_return'])) {
-    $returnState = (string) $_COOKIE['banksync_return'];
+    $encoded = strtr((string) $_COOKIE['banksync_return'], '-_', '+/');
+    $padding = strlen($encoded) % 4;
+    if ($padding) $encoded .= str_repeat('=', 4 - $padding);
+    $decoded = base64_decode($encoded, true);
+    $state = $decoded !== false ? json_decode($decoded, true) : null;
     setcookie('banksync_return', '', time() - 3600, '/');
-    if (preg_match('/^(\d+):(\d+)$/', $returnState, $matches)) {
-        $returnPage = max(0, (int) $matches[1]);
-        $returnRow = max(0, (int) $matches[2]);
-        $returnUrl = dol_buildpath('/banksync/transactions.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&page='.$returnPage;
+    if (is_array($state)) {
+        $returnPage = isset($state['page']) ? max(0, (int) $state['page']) : 0;
+        $returnRow = isset($state['row']) ? max(0, (int) $state['row']) : 0;
+        $returnFilters = banksyncNormalizeReturnFilters(isset($state['filters']) ? $state['filters'] : array());
+        $returnUrl = banksyncListUrl($returnPage, $returnFilters);
         if ($returnRow > 0) $returnUrl .= '#banksync-tx-'.$returnRow;
         header('Location: '.$returnUrl);
         exit;
@@ -41,9 +84,18 @@ if (!isset($_GET['page']) && !isset($_POST['page']) && !empty($_COOKIE['banksync
 
 $page = max(0, GETPOSTINT('page'));
 $limit = 50;
-$offset = $page * $limit;
 $entity = (int) $conf->entity;
 $action = GETPOST('action', 'aZ09');
+
+$filters = banksyncNormalizeReturnFilters(array(
+    'filter_date_from' => GETPOST('filter_date_from', 'alphanohtml'),
+    'filter_date_to' => GETPOST('filter_date_to', 'alphanohtml'),
+    'filter_event_type' => GETPOST('filter_event_type', 'alpha'),
+    'filter_code' => GETPOST('filter_code', 'alphanohtml'),
+    'filter_counterparty' => GETPOST('filter_counterparty', 'alphanohtml'),
+    'filter_reference' => GETPOST('filter_reference', 'alphanohtml'),
+    'filter_status' => GETPOST('filter_status', 'alpha'),
+));
 
 if ($action === 'scan_candidates') {
     if (!$user->hasRight('banksync', 'import')) accessforbidden();
@@ -77,6 +129,28 @@ function banksyncTransactionStatusPresentation($langs, $status)
     }
 }
 
+$where = array('t.entity = '.$entity);
+if (!empty($filters['filter_date_from'])) $where[] = "t.booking_date >= '".$db->escape($filters['filter_date_from'])."'";
+if (!empty($filters['filter_date_to'])) $where[] = "t.booking_date <= '".$db->escape($filters['filter_date_to'])."'";
+if (!empty($filters['filter_event_type'])) $where[] = "t.bank_event_type = '".$db->escape($filters['filter_event_type'])."'";
+if (!empty($filters['filter_code'])) $where[] = "t.transaction_code LIKE '%".$db->escape($filters['filter_code'])."%'";
+if (!empty($filters['filter_counterparty'])) $where[] = "t.counterparty_name LIKE '%".$db->escape($filters['filter_counterparty'])."%'";
+if (!empty($filters['filter_reference'])) $where[] = "t.reference LIKE '%".$db->escape($filters['filter_reference'])."%'";
+if (!empty($filters['filter_status'])) $where[] = "t.status = '".$db->escape($filters['filter_status'])."'";
+$whereSql = implode(' AND ', $where);
+
+$totalRows = 0;
+$countSql = 'SELECT COUNT(*) AS nb FROM '.$db->prefix().'banksync_transaction AS t WHERE '.$whereSql;
+$countRes = $db->query($countSql);
+if ($countRes) {
+    $countObj = $db->fetch_object($countRes);
+    $totalRows = (int) $countObj->nb;
+    $db->free($countRes);
+}
+$totalPages = max(1, (int) ceil($totalRows / $limit));
+if ($page >= $totalPages) $page = $totalPages - 1;
+$offset = $page * $limit;
+
 $sql = 'SELECT t.rowid, t.booking_date, t.value_date, t.direction, t.amount, t.currency, t.transaction_type, t.transaction_code,';
 $sql .= ' t.counterparty_name, t.counterparty_account, t.reference, t.external_transaction_id, t.status, t.fk_import,';
 $sql .= ' t.bank_event_type, t.dolibarr_payment_code, t.classification_confidence, t.classification_method, t.fk_bank,';
@@ -91,28 +165,51 @@ $sql .= ' SELECT bm2.rowid FROM '.$db->prefix().'banksync_match AS bm2';
 $sql .= ' WHERE bm2.entity = t.entity AND bm2.fk_transaction = t.rowid';
 $sql .= " AND bm2.status IN ('confirmed', 'posted', 'suggested')";
 $sql .= " ORDER BY CASE bm2.status WHEN 'confirmed' THEN 0 WHEN 'posted' THEN 1 ELSE 2 END, bm2.confidence DESC, bm2.rowid ASC LIMIT 1)";
-$sql .= ' WHERE t.entity = '.$entity;
+$sql .= ' WHERE '.$whereSql;
 $sql .= ' ORDER BY t.booking_date DESC, t.rowid DESC';
-$sql .= $db->plimit($limit + 1, $offset);
+$sql .= $db->plimit($limit, $offset);
 $resql = $db->query($sql);
 
 llxHeader('', $langs->trans('BankSyncTransactions'));
 print load_fiche_titre($langs->trans('BankSyncTransactions'), '', 'bank');
 
 if ($user->hasRight('banksync', 'import')) {
-    print '<div class="tabsAction"><form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions&page='.$page.'" class="inline-block">';
+    print '<div class="tabsAction"><form method="POST" action="'.dol_escape_htmltag(banksyncListUrl($page, $filters)).'" class="inline-block">';
     print '<input type="hidden" name="token" value="'.newToken().'"><input type="hidden" name="action" value="scan_candidates">';
     print '<button type="submit" class="butAction">'.$langs->trans('BankSyncScanCandidates').'</button></form></div>';
 }
+
+print '<form method="GET" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
+print '<input type="hidden" name="mainmenu" value="bank"><input type="hidden" name="leftmenu" value="banksync_transactions">';
+print '<div class="div-table-responsive"><table class="noborder centpercent">';
+print '<tr class="liste_titre"><th colspan="8">'.$langs->trans('BankSyncFilters').'</th></tr>';
+print '<tr class="oddeven">';
+print '<td><label>'.$langs->trans('BankSyncDateFrom').'<br><input type="date" name="filter_date_from" value="'.dol_escape_htmltag(isset($filters['filter_date_from']) ? $filters['filter_date_from'] : '').'"></label></td>';
+print '<td><label>'.$langs->trans('BankSyncDateTo').'<br><input type="date" name="filter_date_to" value="'.dol_escape_htmltag(isset($filters['filter_date_to']) ? $filters['filter_date_to'] : '').'"></label></td>';
+print '<td><label>'.$langs->trans('BankSyncBankEventType').'<br><select name="filter_event_type" class="flat"><option value="">'.$langs->trans('BankSyncAll').'</option>';
+foreach (banksyncAllowedEventTypes() as $type) {
+    $selected = isset($filters['filter_event_type']) && $filters['filter_event_type'] === $type ? ' selected' : '';
+    print '<option value="'.dol_escape_htmltag($type).'"'.$selected.'>'.dol_escape_htmltag($langs->trans('BankSyncEventType_'.$type)).'</option>';
+}
+print '</select></label></td>';
+print '<td><label>'.$langs->trans('BankSyncTransactionCode').'<br><input class="width100" type="text" name="filter_code" value="'.dol_escape_htmltag(isset($filters['filter_code']) ? $filters['filter_code'] : '').'"></label></td>';
+print '<td><label>'.$langs->trans('BankSyncCounterparty').'<br><input class="minwidth200" type="text" name="filter_counterparty" value="'.dol_escape_htmltag(isset($filters['filter_counterparty']) ? $filters['filter_counterparty'] : '').'"></label></td>';
+print '<td><label>'.$langs->trans('BankSyncReference').'<br><input class="minwidth200" type="text" name="filter_reference" value="'.dol_escape_htmltag(isset($filters['filter_reference']) ? $filters['filter_reference'] : '').'"></label></td>';
+print '<td><label>'.$langs->trans('Status').'<br><select name="filter_status" class="flat"><option value="">'.$langs->trans('BankSyncAll').'</option>';
+foreach (banksyncAllowedStatuses() as $status) {
+    $selected = isset($filters['filter_status']) && $filters['filter_status'] === $status ? ' selected' : '';
+    print '<option value="'.dol_escape_htmltag($status).'"'.$selected.'>'.dol_escape_htmltag(banksyncTransactionStatusPresentation($langs, $status)['label']).'</option>';
+}
+print '</select></label></td>';
+print '<td class="right valignbottom nowrap"><button type="submit" class="button">'.$langs->trans('BankSyncApplyFilters').'</button> <a class="button" href="'.dol_buildpath('/banksync/transactions.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions">'.$langs->trans('BankSyncClearFilters').'</a></td>';
+print '</tr></table></div></form><br>';
 
 print '<div class="div-table-responsive"><table class="noborder centpercent">';
 print '<tr class="liste_titre"><th>'.$langs->trans('BankSyncBookingDate').'</th><th>'.$langs->trans('BankSyncBankEventType').'</th><th>'.$langs->trans('BankSyncTransactionCode').'</th><th>'.$langs->trans('BankSyncCounterparty').'</th><th>'.$langs->trans('BankSyncReference').'</th><th>'.$langs->trans('BankSyncDolibarrBankAccount').'</th><th class="right">'.$langs->trans('Amount').'</th><th>'.$langs->trans('BankSyncReconciliation').'</th><th>'.$langs->trans('Status').'</th></tr>';
 
 $num = 0;
-$hasMore = false;
 if ($resql) {
     while ($obj = $db->fetch_object($resql)) {
-        if ($num >= $limit) { $hasMore = true; break; }
         $num++;
         print '<tr id="banksync-tx-'.(int) $obj->rowid.'" class="oddeven"><td>'.dol_escape_htmltag((string) $obj->booking_date).'</td><td>';
         $eventType = !empty($obj->bank_event_type) ? $obj->bank_event_type : 'other';
@@ -133,7 +230,8 @@ if ($resql) {
         print '</td><td class="right nowrap">'.price($obj->amount).' '.dol_escape_htmltag($obj->currency).'</td><td>';
 
         $reconcileUrl = dol_buildpath('/banksync/reconcile.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.(int) $obj->rowid;
-        $returnState = $page.':'.(int) $obj->rowid;
+        $returnStatePayload = json_encode(array('page' => $page, 'row' => (int) $obj->rowid, 'filters' => $filters));
+        $returnState = rtrim(strtr(base64_encode($returnStatePayload), '+/', '-_'), '=');
         $rememberReturn = "document.cookie='banksync_return=".$returnState."; path=/; max-age=1800; SameSite=Lax';";
         if ($eventType === 'bank_fee') {
             print '<span class="badge badge-status4">'.$langs->trans('BankSyncTarget_bank_fee').'</span><br><a class="small" onclick="'.dol_escape_htmltag($rememberReturn).'" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncReview').'</a>';
@@ -167,10 +265,31 @@ if ($resql) {
 }
 
 if ($num === 0) print '<tr><td colspan="9"><span class="opacitymedium">'.$langs->trans('BankSyncNoTransactions').'</span></td></tr>';
-print '</table></div><div class="pagination">';
-if ($page > 0) print '<a class="button" href="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions&page='.($page - 1).'">&laquo; '.$langs->trans('Previous').'</a> ';
-if ($hasMore) print '<a class="button" href="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'?mainmenu=bank&leftmenu=banksync_transactions&page='.($page + 1).'">'.$langs->trans('Next').' &raquo;</a>';
-print '</div>';
+print '</table></div>';
+
+if ($totalRows > 0) {
+    print '<div class="pagination">';
+    if ($page > 0) print '<a class="button" href="'.dol_escape_htmltag(banksyncListUrl($page - 1, $filters)).'">&laquo; '.$langs->trans('Previous').'</a> ';
+
+    $windowStart = max(0, $page - 2);
+    $windowEnd = min($totalPages - 1, $page + 2);
+    if ($windowStart > 0) {
+        print '<a class="button" href="'.dol_escape_htmltag(banksyncListUrl(0, $filters)).'">1</a> ';
+        if ($windowStart > 1) print '<span class="opacitymedium">…</span> ';
+    }
+    for ($p = $windowStart; $p <= $windowEnd; $p++) {
+        if ($p === $page) print '<span class="button disabled">'.($p + 1).'</span> ';
+        else print '<a class="button" href="'.dol_escape_htmltag(banksyncListUrl($p, $filters)).'">'.($p + 1).'</a> ';
+    }
+    if ($windowEnd < $totalPages - 1) {
+        if ($windowEnd < $totalPages - 2) print '<span class="opacitymedium">…</span> ';
+        print '<a class="button" href="'.dol_escape_htmltag(banksyncListUrl($totalPages - 1, $filters)).'">'.$totalPages.'</a> ';
+    }
+
+    if ($page < $totalPages - 1) print '<a class="button" href="'.dol_escape_htmltag(banksyncListUrl($page + 1, $filters)).'">'.$langs->trans('Next').' &raquo;</a>';
+    print '<span class="opacitymedium small"> '.$langs->trans('BankSyncTransactionCount', $totalRows).'</span>';
+    print '</div>';
+}
 
 llxFooter();
 $db->close();
