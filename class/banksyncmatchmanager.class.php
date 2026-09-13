@@ -4,9 +4,9 @@
 /**
  * Generic reconciliation allocation manager.
  *
- * The target is intentionally polymorphic: later handlers translate target_type/target_id
- * into native Dolibarr payment objects such as Paiement, PaiementFourn,
- * PaymentSalary or PaymentSocialContribution.
+ * One bank transaction may have multiple allocations. The target is intentionally
+ * polymorphic so later posting handlers can translate targets into native Dolibarr
+ * payment/settlement objects.
  */
 class BankSyncMatchManager
 {
@@ -42,6 +42,7 @@ class BankSyncMatchManager
         $targetId = (int) $targetId;
         $confidence = max(0, min(100, (int) $confidence));
         $status = in_array($status, array('suggested', 'confirmed', 'rejected', 'posted'), true) ? $status : 'suggested';
+        $allocatedAmount = $this->normalizeAmount($allocatedAmount);
         if ($transactionId <= 0 || $targetId <= 0 || trim((string) $targetType) === '') {
             throw new InvalidArgumentException('Invalid reconciliation target.');
         }
@@ -50,7 +51,7 @@ class BankSyncMatchManager
         if ($existing) {
             $id = (int) $existing->rowid;
             $sql = 'UPDATE '.$this->db->prefix().'banksync_match SET';
-            $sql .= " allocated_amount = '".$this->db->escape((string) $allocatedAmount)."'";
+            $sql .= " allocated_amount = '".$this->db->escape($allocatedAmount)."'";
             $sql .= ', confidence = '.$confidence;
             $sql .= ", match_method = '".$this->db->escape((string) $method)."'";
             $sql .= ", status = '".$this->db->escape($status)."'";
@@ -82,7 +83,7 @@ class BankSyncMatchManager
             }
 
             $sql = 'UPDATE '.$this->db->prefix().'banksync_match SET';
-            $sql .= " allocated_amount = '".$this->db->escape((string) $allocatedAmount)."'";
+            $sql .= " allocated_amount = '".$this->db->escape($this->normalizeAmount($allocatedAmount))."'";
             $sql .= ', confidence = '.max(0, min(100, (int) $confidence));
             $sql .= ", match_method = '".$this->db->escape((string) $method)."'";
             $sql .= ', fk_user_modif = '.((int) $userId);
@@ -106,7 +107,10 @@ class BankSyncMatchManager
         }
     }
 
-    public function setStatus($matchId, $status, $userId, $transactionId = 0)
+    /**
+     * Change workflow state and optionally change the allocation amount at confirmation time.
+     */
+    public function setStatus($matchId, $status, $userId, $transactionId = 0, $allocatedAmount = null)
     {
         if (!in_array($status, array('suggested', 'confirmed', 'rejected', 'posted'), true)) {
             throw new InvalidArgumentException('Invalid reconciliation status.');
@@ -131,6 +135,9 @@ class BankSyncMatchManager
 
         $sql = 'UPDATE '.$this->db->prefix().'banksync_match';
         $sql .= " SET status = '".$this->db->escape($status)."', fk_user_modif = ".((int) $userId);
+        if ($allocatedAmount !== null && $allocatedAmount !== '') {
+            $sql .= ", allocated_amount = '".$this->db->escape($this->normalizeAmount($allocatedAmount))."'";
+        }
         $sql .= ' WHERE rowid = '.((int) $matchId).' AND entity = '.$this->entity;
         if (!$this->db->query($sql)) {
             throw new RuntimeException($this->db->lasterror());
@@ -159,6 +166,52 @@ class BankSyncMatchManager
         return $rows;
     }
 
+    /**
+     * Return transaction-level reconciliation allocation summary.
+     * Confirmed/posted allocations are signed deliberately so future credit-note
+     * allocations can offset normal invoice allocations.
+     *
+     * @return array<string,mixed>
+     */
+    public function getAllocationSummary($transactionId)
+    {
+        $transactionId = (int) $transactionId;
+        $sql = 'SELECT amount, currency FROM '.$this->db->prefix().'banksync_transaction';
+        $sql .= ' WHERE rowid = '.$transactionId.' AND entity = '.$this->entity.' LIMIT 1';
+        $resql = $this->db->query($sql);
+        if (!$resql) throw new RuntimeException($this->db->lasterror());
+        $tx = $this->db->fetch_object($resql);
+        $this->db->free($resql);
+        if (!$tx) throw new RuntimeException('BankSync transaction not found.');
+
+        $sql = 'SELECT';
+        $sql .= " COALESCE(SUM(CASE WHEN status IN ('confirmed','posted') THEN allocated_amount ELSE 0 END),0) AS allocated_amount,";
+        $sql .= " SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed_count,";
+        $sql .= " SUM(CASE WHEN status = 'posted' THEN 1 ELSE 0 END) AS posted_count";
+        $sql .= ' FROM '.$this->db->prefix().'banksync_match';
+        $sql .= ' WHERE entity = '.$this->entity.' AND fk_transaction = '.$transactionId;
+        $resql = $this->db->query($sql);
+        if (!$resql) throw new RuntimeException($this->db->lasterror());
+        $sum = $this->db->fetch_object($resql);
+        $this->db->free($resql);
+
+        $target = abs((float) $tx->amount);
+        $allocated = (float) $sum->allocated_amount;
+        $remaining = $target - $allocated;
+        $balanced = abs($remaining) <= 0.01;
+
+        return array(
+            'transaction_amount' => (float) $tx->amount,
+            'target_amount' => $target,
+            'allocated_amount' => $allocated,
+            'remaining_amount' => $remaining,
+            'confirmed_count' => (int) $sum->confirmed_count,
+            'posted_count' => (int) $sum->posted_count,
+            'balanced' => $balanced,
+            'currency' => (string) $tx->currency,
+        );
+    }
+
     /** @return object|null */
     private function findExisting($transactionId, $targetType, $targetId)
     {
@@ -182,7 +235,7 @@ class BankSyncMatchManager
         $sql .= ') VALUES (';
         $sql .= $this->entity.', '.((int) $transactionId);
         $sql .= ", '".$this->db->escape((string) $targetType)."', ".((int) $targetId);
-        $sql .= ", '".$this->db->escape((string) $allocatedAmount)."'";
+        $sql .= ", '".$this->db->escape($this->normalizeAmount($allocatedAmount))."'";
         $sql .= ', '.max(0, min(100, (int) $confidence));
         $sql .= ", '".$this->db->escape((string) $method)."'";
         $sql .= ", '".$this->db->escape((string) $status)."'";
@@ -197,40 +250,43 @@ class BankSyncMatchManager
     private function syncTransactionStatus($transactionId)
     {
         $transactionId = (int) $transactionId;
-        if ($transactionId <= 0) {
-            return;
-        }
+        if ($transactionId <= 0) return;
 
         $sql = 'SELECT status FROM '.$this->db->prefix().'banksync_transaction';
         $sql .= ' WHERE rowid = '.$transactionId.' AND entity = '.$this->entity.' LIMIT 1';
         $resql = $this->db->query($sql);
-        if (!$resql) {
-            throw new RuntimeException($this->db->lasterror());
-        }
+        if (!$resql) throw new RuntimeException($this->db->lasterror());
         $tx = $this->db->fetch_object($resql);
         $this->db->free($resql);
-        if (!$tx || in_array((string) $tx->status, array('posted', 'ignored', 'error'), true)) {
-            return;
+        if (!$tx || in_array((string) $tx->status, array('posted', 'ignored', 'error'), true)) return;
+
+        $summary = $this->getAllocationSummary($transactionId);
+        if ((int) $summary['confirmed_count'] + (int) $summary['posted_count'] === 0) {
+            $status = 'new';
+        } elseif (!empty($summary['balanced'])) {
+            $status = 'matched';
+        } else {
+            $status = 'partially_matched';
         }
 
-        $sql = 'SELECT';
-        $sql .= " SUM(CASE WHEN status = 'posted' THEN 1 ELSE 0 END) AS posted_count,";
-        $sql .= " SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) AS confirmed_count";
-        $sql .= ' FROM '.$this->db->prefix().'banksync_match';
-        $sql .= ' WHERE entity = '.$this->entity.' AND fk_transaction = '.$transactionId;
-        $resql = $this->db->query($sql);
-        if (!$resql) {
-            throw new RuntimeException($this->db->lasterror());
-        }
-        $counts = $this->db->fetch_object($resql);
-        $this->db->free($resql);
-
-        $status = ((int) $counts->posted_count > 0) ? 'posted' : (((int) $counts->confirmed_count > 0) ? 'matched' : 'new');
         $sql = 'UPDATE '.$this->db->prefix().'banksync_transaction';
         $sql .= " SET status = '".$this->db->escape($status)."'";
         $sql .= ' WHERE rowid = '.$transactionId.' AND entity = '.$this->entity;
         if (!$this->db->query($sql)) {
             throw new RuntimeException($this->db->lasterror());
         }
+    }
+
+    private function normalizeAmount($value)
+    {
+        $value = trim((string) $value);
+        $value = str_replace(array("\xc2\xa0", ' '), '', $value);
+        if (substr_count($value, ',') === 1 && strpos($value, '.') === false) {
+            $value = str_replace(',', '.', $value);
+        }
+        if (!is_numeric($value)) {
+            throw new InvalidArgumentException('Invalid allocation amount.');
+        }
+        return number_format((float) $value, 8, '.', '');
     }
 }
