@@ -100,6 +100,29 @@ function banksyncReasonLabel($langs, $code)
     return $label === $key ? $code : $label;
 }
 
+/**
+ * Return presentation metadata for a scored reconciliation candidate.
+ * This is deliberately separate from workflow status (suggested/confirmed/rejected/posted).
+ *
+ * @param Translate $langs Translation handler
+ * @param int $confidence Match confidence 0..100
+ * @return array{class:string,label:string}
+ */
+function banksyncConfidencePresentation($langs, $confidence)
+{
+    $confidence = (int) $confidence;
+    if ($confidence >= 100) {
+        return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncConfidenceCertain'));
+    }
+    if ($confidence >= 80) {
+        return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidenceStrong'));
+    }
+    if ($confidence >= 60) {
+        return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncConfidencePossible'));
+    }
+    return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncConfidenceWeak'));
+}
+
 llxHeader('', $langs->trans('BankSyncReconciliation'));
 
 print load_fiche_titre($langs->trans('BankSyncReconciliation').' #'.((int) $transactionId), '', 'bank');
@@ -154,6 +177,8 @@ if ((string) $transaction->bank_event_type === 'bank_fee') {
 
     foreach ($candidates as $candidate) {
         $status = isset($candidate['status']) ? (string) $candidate['status'] : 'suggested';
+        $confidence = (int) $candidate['confidence'];
+        $confidencePresentation = banksyncConfidencePresentation($langs, $confidence);
         print '<tr class="oddeven">';
         print '<td>'.dol_escape_htmltag(banksyncTargetLabel($langs, (string) $candidate['target_type'])).'</td>';
         print '<td>';
@@ -166,7 +191,7 @@ if ((string) $transaction->bank_event_type === 'bank_fee') {
         print '<td>'.dol_escape_htmltag((string) $candidate['label']).'</td>';
         print '<td>'.dol_escape_htmltag((string) $candidate['date']).'</td>';
         print '<td class="right nowrap">'.price($candidate['remaining_amount']).' '.dol_escape_htmltag((string) $transaction->currency).'</td>';
-        print '<td class="center"><strong>'.((int) $candidate['confidence']).'%</strong></td>';
+        print '<td class="center"><span class="badge '.dol_escape_htmltag($confidencePresentation['class']).'">'.$confidence.'%</span></td>';
         print '<td>';
         $reasonLabels = array();
         foreach ($candidate['reason_codes'] as $reasonCode) {
@@ -182,7 +207,7 @@ if ((string) $transaction->bank_event_type === 'bank_fee') {
         } elseif ($status === 'posted') {
             print '<span class="badge badge-status6">'.$langs->trans('BankSyncMatchPostedStatus').'</span>';
         } else {
-            print '<span class="badge badge-status1">'.$langs->trans('BankSyncSuggested').'</span>';
+            print '<span class="badge '.dol_escape_htmltag($confidencePresentation['class']).'">'.dol_escape_htmltag($confidencePresentation['label']).'</span>';
         }
         print '</td>';
         print '<td class="right nowrap">';
