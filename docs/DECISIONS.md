@@ -40,6 +40,9 @@ Notes:
   - confidence: Certain / Strong / Possible / Weak / Manual
   - workflow: suggested / confirmed / rejected / posted
 - Manual reconciliation is always available even when the automatic matcher produces no candidate.
+- Card transactions require merchant-aware matching because provider merchant text often differs from the legal Dolibarr partner name and card rows do not expose a usable partner IBAN.
+- For card transactions, a strong normalized merchant-name <-> partner-name match is sufficient to surface open supplier invoices as candidates even when amount/reference/date evidence is weak. Such candidates remain advisory and must still be confirmed manually.
+- Card candidate ranking should use amount proximity and date proximity to rank multiple open invoices from the same merchant, but weak amount/date evidence must not suppress an otherwise clear merchant relationship.
 
 ## Allocation model
 
