@@ -68,10 +68,20 @@ class BankSyncCandidateMatcher
         }
 
         usort($candidates, function ($a, $b) {
-            if ((int) $a['confidence'] === (int) $b['confidence']) {
-                return strcmp((string) $a['target_type'].':'.(string) $a['target_id'], (string) $b['target_type'].':'.(string) $b['target_id']);
+            if ((int) $a['confidence'] !== (int) $b['confidence']) {
+                return ((int) $a['confidence'] > (int) $b['confidence']) ? -1 : 1;
             }
-            return ((int) $a['confidence'] > (int) $b['confidence']) ? -1 : 1;
+            $dateA = isset($a['date_distance']) ? (int) $a['date_distance'] : PHP_INT_MAX;
+            $dateB = isset($b['date_distance']) ? (int) $b['date_distance'] : PHP_INT_MAX;
+            if ($dateA !== $dateB) {
+                return $dateA < $dateB ? -1 : 1;
+            }
+            $amountA = isset($a['amount_distance']) ? (float) $a['amount_distance'] : PHP_INT_MAX;
+            $amountB = isset($b['amount_distance']) ? (float) $b['amount_distance'] : PHP_INT_MAX;
+            if ($amountA != $amountB) {
+                return $amountA < $amountB ? -1 : 1;
+            }
+            return strcmp((string) $a['target_type'].':'.(string) $a['target_id'], (string) $b['target_type'].':'.(string) $b['target_id']);
         });
 
         $deduped = array();
@@ -253,6 +263,7 @@ class BankSyncCandidateMatcher
         $reasons = array();
         $reasonCodes = array();
         $amount = abs((float) $transaction->amount);
+        $isCard = ((string) $transaction->bank_event_type === 'card');
 
         if ($this->moneyEquals($amount, $remaining)) {
             $score += 40;
@@ -276,7 +287,7 @@ class BankSyncCandidateMatcher
         }
 
         $account = (string) $transaction->counterparty_account;
-        if ((string) $transaction->bank_event_type !== 'card' && $account !== '' && $this->partnerAccountMatches((int) $invoice->fk_soc, $account)) {
+        if (!$isCard && $account !== '' && $this->partnerAccountMatches((int) $invoice->fk_soc, $account)) {
             $score += 35;
             $reasons[] = 'Counterparty bank account';
             $reasonCodes[] = 'account';
@@ -284,25 +295,41 @@ class BankSyncCandidateMatcher
 
         $nameScore = $this->nameStrength((string) $transaction->counterparty_name, (string) $invoice->nom);
         if ($nameScore >= 2) {
-            $score += 20;
-            $reasons[] = 'Counterparty name';
+            $score += $isCard ? 50 : 20;
+            $reasons[] = $isCard ? 'Card merchant name' : 'Counterparty name';
             $reasonCodes[] = 'partner';
         } elseif ($nameScore === 1) {
-            $score += 10;
-            $reasons[] = 'Similar counterparty name';
+            $score += $isCard ? 30 : 10;
+            $reasons[] = $isCard ? 'Similar card merchant name' : 'Similar counterparty name';
             $reasonCodes[] = 'partner_similar';
         }
 
         $days = $this->dayDistance((string) $transaction->booking_date, (string) $invoice->datef);
         if ($days !== null) {
-            if ($days <= 14) {
-                $score += 10;
-                $reasons[] = 'Date within 14 days';
-                $reasonCodes[] = 'date';
-            } elseif ($days <= 60) {
-                $score += 5;
-                $reasons[] = 'Date within 60 days';
-                $reasonCodes[] = 'date_near';
+            if ($isCard) {
+                if ($days <= 14) {
+                    $score += 15;
+                    $reasons[] = 'Card transaction date within 14 days';
+                    $reasonCodes[] = 'date';
+                } elseif ($days <= 45) {
+                    $score += 10;
+                    $reasons[] = 'Card transaction date within 45 days';
+                    $reasonCodes[] = 'date_near';
+                } elseif ($days <= 90) {
+                    $score += 5;
+                    $reasons[] = 'Card transaction date within 90 days';
+                    $reasonCodes[] = 'date_near';
+                }
+            } else {
+                if ($days <= 14) {
+                    $score += 10;
+                    $reasons[] = 'Date within 14 days';
+                    $reasonCodes[] = 'date';
+                } elseif ($days <= 60) {
+                    $score += 5;
+                    $reasons[] = 'Date within 60 days';
+                    $reasonCodes[] = 'date_near';
+                }
             }
         }
 
@@ -330,6 +357,8 @@ class BankSyncCandidateMatcher
             'confidence' => $score,
             'reasons' => $reasons,
             'reason_codes' => $reasonCodes,
+            'date_distance' => $days === null ? PHP_INT_MAX : $days,
+            'amount_distance' => abs($amount - $remaining),
             'url' => '',
         );
     }
@@ -574,11 +603,17 @@ class BankSyncCandidateMatcher
         if ($a === '' || $b === '') {
             return 0;
         }
+        $compactA = str_replace(' ', '', $a);
+        $compactB = str_replace(' ', '', $b);
         if ($a === $b || strpos($a, $b) !== false || strpos($b, $a) !== false) {
             return 2;
         }
-        similar_text($a, $b, $percent);
-        return $percent >= 72 ? 1 : 0;
+        if (strlen($compactA) >= 4 && strlen($compactB) >= 4 && ($compactA === $compactB || strpos($compactA, $compactB) !== false || strpos($compactB, $compactA) !== false)) {
+            return 2;
+        }
+        similar_text($a, $b, $percentSpaced);
+        similar_text($compactA, $compactB, $percentCompact);
+        return max($percentSpaced, $percentCompact) >= 72 ? 1 : 0;
     }
 
     private function tokenOverlap($a, $b)
