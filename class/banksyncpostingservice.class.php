@@ -3,16 +3,20 @@
 
 require_once DOL_DOCUMENT_ROOT.'/compta/facture/class/facture.class.php';
 require_once DOL_DOCUMENT_ROOT.'/fourn/class/fournisseur.facture.class.php';
+require_once DOL_DOCUMENT_ROOT.'/compta/paiement/class/paiement.class.php';
+require_once DOL_DOCUMENT_ROOT.'/fourn/class/paiementfourn.class.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/bank/class/account.class.php';
+require_once DOL_DOCUMENT_ROOT.'/compta/bank/class/paymentvarious.class.php';
+require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
 require_once __DIR__.'/banksyncmatchmanager.class.php';
+require_once __DIR__.'/banksyncpostingmanager.class.php';
 
 /**
- * Builds a read-only preview of the native Dolibarr posting that would be created
- * from a reconciled BankSync transaction.
+ * Builds a posting preview and, after explicit confirmation, creates native
+ * Dolibarr payment objects through Dolibarr domain APIs.
  *
- * IMPORTANT: this class deliberately does not write to Dolibarr core tables.
- * Native posting must later be implemented through Dolibarr business objects
- * (Paiement, PaiementFourn, Account::addline(), addPaymentToBank(), ...).
+ * IMPORTANT: no direct SQL writes to Dolibarr core business tables are made here.
+ * SQL in this class is limited to BankSync-owned staging metadata.
  */
 class BankSyncPostingService
 {
@@ -22,12 +26,15 @@ class BankSyncPostingService
     private $entity;
     /** @var BankSyncMatchManager */
     private $matchManager;
+    /** @var BankSyncPostingManager */
+    private $postingManager;
 
     public function __construct($db, $entity)
     {
         $this->db = $db;
         $this->entity = (int) $entity;
         $this->matchManager = new BankSyncMatchManager($db, $entity);
+        $this->postingManager = new BankSyncPostingManager($db, $entity);
     }
 
     /**
@@ -38,10 +45,13 @@ class BankSyncPostingService
      */
     public function buildPreview($transaction)
     {
+        global $conf;
+
         $preview = array(
             'postable' => false,
             'kind' => '',
             'payment_code' => '',
+            'payment_mode_id' => 0,
             'bank_account_id' => !empty($transaction->fk_bank_account) ? (int) $transaction->fk_bank_account : 0,
             'bank_account_label' => trim((string) (!empty($transaction->bank_account_label) ? $transaction->bank_account_label : $transaction->bank_account_ref)),
             'bank_amount' => abs((float) $transaction->amount),
@@ -54,7 +64,16 @@ class BankSyncPostingService
             'warnings' => array(),
             'errors' => array(),
             'rounding_difference' => 0.0,
+            'thirdparty_id' => 0,
+            'bank_fee_accountancy_code' => '',
+            'existing_posting' => null,
         );
+
+        $existingPosting = $this->postingManager->getForTransaction((int) $transaction->rowid);
+        if ($existingPosting) {
+            $preview['existing_posting'] = $existingPosting;
+            $preview['errors'][] = ((string) $existingPosting->status === 'posted') ? 'BankSyncPostingAlreadyPosted' : 'BankSyncPostingAlreadyInProgress';
+        }
 
         if ($preview['bank_account_id'] <= 0) {
             $preview['errors'][] = 'BankSyncPostingMissingBankAccount';
@@ -66,20 +85,35 @@ class BankSyncPostingService
                 $preview['bank_account_label'] = trim((string) $account->label) !== '' ? (string) $account->label : (string) $account->ref;
                 $accountCurrency = trim((string) $account->currency_code);
                 if ($accountCurrency !== '' && strtoupper($accountCurrency) !== strtoupper($preview['currency'])) {
-                    $preview['warnings'][] = 'BankSyncPostingBankCurrencyMismatch';
+                    $preview['errors'][] = 'BankSyncPostingBankCurrencyMismatch';
                 }
             }
         }
 
-        // Bank fees do not need a business-object match. They will later be posted
-        // through the native Account::addline() API as their own bank movement.
+        // First native posting milestone intentionally supports company-currency
+        // payments only. FX posting requires an explicit exchange-rate workflow.
+        if (strtoupper($preview['currency']) !== strtoupper((string) $conf->currency)) {
+            $preview['errors'][] = 'BankSyncPostingForeignCurrencyNotSupportedYet';
+        }
+
+        // Bank fees are native miscellaneous payments. PaymentVarious itself creates
+        // and links the bank line through Account::addline().
         if ((string) $transaction->bank_event_type === 'bank_fee') {
             $preview['kind'] = BankSyncMatchManager::TARGET_BANK_FEE;
+            $preview['payment_code'] = $this->inferBankFeePaymentCode($transaction);
+            $preview['payment_mode_id'] = (int) dol_getIdFromCode($this->db, $preview['payment_code'], 'c_paiement', 'code', 'id', 1);
+            if ($preview['payment_mode_id'] <= 0) $preview['errors'][] = 'BankSyncPostingPaymentCodeNotFound';
+
+            $preview['bank_fee_accountancy_code'] = getDolGlobalString('BANKSYNC_BANK_FEE_ACCOUNTANCY_CODE');
+            if (isModEnabled('accounting') && trim($preview['bank_fee_accountancy_code']) === '') {
+                $preview['errors'][] = 'BankSyncPostingBankFeeAccountancyCodeRequired';
+            }
+
             $preview['rows'][] = array(
                 'target_type' => BankSyncMatchManager::TARGET_BANK_FEE,
                 'target_id' => 0,
                 'ref' => (string) $transaction->transaction_code,
-                'label' => (string) $transaction->transaction_type,
+                'label' => trim((string) $transaction->transaction_type) !== '' ? (string) $transaction->transaction_type : (string) $transaction->counterparty_name,
                 'thirdparty' => (string) $transaction->counterparty_name,
                 'allocated_amount' => abs((float) $transaction->amount),
                 'remaining_before' => null,
@@ -121,8 +155,8 @@ class BankSyncPostingService
         if ($preview['payment_code'] === '') {
             $preview['errors'][] = 'BankSyncPostingMissingPaymentCode';
         } else {
-            $paymentModeId = dol_getIdFromCode($this->db, $preview['payment_code'], 'c_paiement', 'code', 'id', 1);
-            if ((int) $paymentModeId <= 0) $preview['errors'][] = 'BankSyncPostingPaymentCodeNotFound';
+            $preview['payment_mode_id'] = (int) dol_getIdFromCode($this->db, $preview['payment_code'], 'c_paiement', 'code', 'id', 1);
+            if ($preview['payment_mode_id'] <= 0) $preview['errors'][] = 'BankSyncPostingPaymentCodeNotFound';
         }
 
         $thirdpartyId = 0;
@@ -167,15 +201,13 @@ class BankSyncPostingService
             if ($thirdpartyId === 0) $thirdpartyId = $invoiceThirdpartyId;
             elseif ($invoiceThirdpartyId !== $thirdpartyId) $preview['errors'][] = 'BankSyncPostingMultipleThirdparties';
 
-            // Credit-note settlement is intentionally deferred until its signed
-            // allocation workflow is implemented explicitly.
             if (($targetType === BankSyncMatchManager::TARGET_CUSTOMER_INVOICE && (int) $invoice->type === Facture::TYPE_CREDIT_NOTE)
                 || ($targetType === BankSyncMatchManager::TARGET_SUPPLIER_INVOICE && (int) $invoice->type === FactureFournisseur::TYPE_CREDIT_NOTE)) {
                 $preview['errors'][] = 'BankSyncPostingCreditNoteNotSupportedYet';
             }
 
             if ($allocated - abs($remaining) > 0.00001) {
-                $preview['warnings'][] = 'BankSyncPostingAllocationExceedsCurrentRemaining';
+                $preview['errors'][] = 'BankSyncPostingAllocationExceedsCurrentRemaining';
             }
 
             $preview['rows'][] = array(
@@ -192,14 +224,210 @@ class BankSyncPostingService
         }
 
         if ($targetType === BankSyncMatchManager::TARGET_CUSTOMER_INVOICE && (float) $transaction->amount < 0) {
-            $preview['warnings'][] = 'BankSyncPostingUnexpectedDirection';
+            $preview['errors'][] = 'BankSyncPostingUnexpectedDirection';
         }
         if ($targetType === BankSyncMatchManager::TARGET_SUPPLIER_INVOICE && (float) $transaction->amount > 0) {
-            $preview['warnings'][] = 'BankSyncPostingUnexpectedDirection';
+            $preview['errors'][] = 'BankSyncPostingUnexpectedDirection';
         }
 
         $preview['thirdparty_id'] = $thirdpartyId;
         $preview['postable'] = empty($preview['errors']);
         return $preview;
+    }
+
+    /**
+     * Create the native Dolibarr posting after explicit user confirmation.
+     *
+     * @param object $transaction BankSync staging transaction
+     * @param User $user Current user
+     * @return array<string,int|string>
+     */
+    public function post($transaction, $user)
+    {
+        $preview = $this->buildPreview($transaction);
+        if (empty($preview['postable'])) {
+            throw new RuntimeException(!empty($preview['errors']) ? (string) $preview['errors'][0] : 'BankSyncPostingBlocked');
+        }
+
+        $this->db->begin();
+        try {
+            $postingId = $this->postingManager->acquire((int) $transaction->rowid, (string) $preview['kind'], (int) $user->id);
+
+            if ((string) $preview['kind'] === BankSyncMatchManager::TARGET_CUSTOMER_INVOICE
+                || (string) $preview['kind'] === BankSyncMatchManager::TARGET_SUPPLIER_INVOICE) {
+                $native = $this->postInvoicePayment($transaction, $preview, $user);
+            } elseif ((string) $preview['kind'] === BankSyncMatchManager::TARGET_BANK_FEE) {
+                $native = $this->postBankFee($transaction, $preview, $user);
+            } else {
+                throw new RuntimeException('BankSyncPostingTargetNotSupportedYet');
+            }
+
+            $this->postingManager->markPosted($postingId, $native['native_object_type'], $native['native_object_id'], $native['bank_line_id'], (int) $user->id);
+            $this->postingManager->markBankSyncObjectsPosted((int) $transaction->rowid, (int) $user->id);
+            $this->db->commit();
+
+            return array(
+                'posting_id' => $postingId,
+                'native_object_type' => $native['native_object_type'],
+                'native_object_id' => $native['native_object_id'],
+                'bank_line_id' => $native['bank_line_id'],
+            );
+        } catch (Throwable $e) {
+            $this->db->rollback();
+            throw $e;
+        }
+    }
+
+    /** @return array<string,int|string> */
+    private function postInvoicePayment($transaction, $preview, $user)
+    {
+        global $conf;
+
+        $thirdparty = new Societe($this->db);
+        if ((int) $preview['thirdparty_id'] <= 0 || $thirdparty->fetch((int) $preview['thirdparty_id']) <= 0) {
+            throw new RuntimeException('BankSyncPostingThirdpartyNotFound');
+        }
+
+        $amounts = array();
+        $multicurrencyCode = array();
+        $multicurrencyTx = array();
+        foreach ($preview['rows'] as $row) {
+            $id = (int) $row['target_id'];
+            $amounts[$id] = (float) $row['allocated_amount'];
+
+            if ((string) $preview['kind'] === BankSyncMatchManager::TARGET_CUSTOMER_INVOICE) {
+                $invoice = new Facture($this->db);
+            } else {
+                $invoice = new FactureFournisseur($this->db);
+            }
+            if ($invoice->fetch($id) <= 0) throw new RuntimeException('BankSyncPostingInvoiceNotFound');
+            $multicurrencyCode[$id] = trim((string) $invoice->multicurrency_code) !== '' ? (string) $invoice->multicurrency_code : (string) $conf->currency;
+            $multicurrencyTx[$id] = !empty($invoice->multicurrency_tx) ? (float) $invoice->multicurrency_tx : 1.0;
+        }
+
+        if ((string) $preview['kind'] === BankSyncMatchManager::TARGET_CUSTOMER_INVOICE) {
+            $payment = new Paiement($this->db);
+            $mode = 'payment';
+            $label = '(CustomerInvoicePayment)';
+            $nativeType = 'payment';
+        } else {
+            $payment = new PaiementFourn($this->db);
+            $mode = 'payment_supplier';
+            $label = '(SupplierInvoicePayment)';
+            $nativeType = 'payment_supplier';
+        }
+
+        $payment->datepaye = $this->sqlDateToTimestamp((string) $preview['booking_date']);
+        $payment->amounts = $amounts;
+        $payment->multicurrency_amounts = array();
+        $payment->multicurrency_code = $multicurrencyCode;
+        $payment->multicurrency_tx = $multicurrencyTx;
+        $payment->paiementcode = (string) $preview['payment_code'];
+        $payment->paiementid = (int) $preview['payment_mode_id'];
+        $payment->num_payment = $this->bankReference($transaction);
+        $payment->note_private = $this->auditNote($transaction);
+        $payment->fk_account = (int) $preview['bank_account_id'];
+
+        // closepaidinvoices=1 makes fully settled invoices switch to paid while
+        // partial allocations remain open with their native remaining balance.
+        $paymentId = $payment->create($user, 1, $thirdparty);
+        if ($paymentId <= 0) {
+            throw new RuntimeException($payment->error ? $payment->error : 'BankSyncPostingPaymentCreateFailed');
+        }
+
+        $bankLineId = $payment->addPaymentToBank($user, $mode, $label, (int) $preview['bank_account_id'], '', '');
+        if ($bankLineId <= 0) {
+            throw new RuntimeException($payment->error ? $payment->error : 'BankSyncPostingBankLineCreateFailed');
+        }
+
+        return array(
+            'native_object_type' => $nativeType,
+            'native_object_id' => (int) $paymentId,
+            'bank_line_id' => (int) $bankLineId,
+        );
+    }
+
+    /** @return array<string,int|string> */
+    private function postBankFee($transaction, $preview, $user)
+    {
+        $payment = new PaymentVarious($this->db);
+        $payment->fk_account = (int) $preview['bank_account_id'];
+        $payment->accountid = $payment->fk_account;
+        $payment->datep = $this->sqlDateToTimestamp((string) $preview['booking_date']);
+        $payment->datev = $payment->datep;
+        $payment->amount = abs((float) $transaction->amount);
+        $payment->label = trim((string) $transaction->transaction_type) !== '' ? (string) $transaction->transaction_type : 'Bank fee';
+        $payment->note_private = $this->auditNote($transaction);
+        $payment->note = $payment->note_private;
+        $payment->type_payment = (int) $preview['payment_mode_id'];
+        $payment->num_payment = $this->bankReference($transaction);
+        $payment->fk_user_author = (int) $user->id;
+        $payment->accountancy_code = (string) $preview['bank_fee_accountancy_code'];
+        $payment->subledger_account = '';
+        $payment->sens = ((float) $transaction->amount < 0) ? 0 : 1;
+
+        $paymentId = $payment->create($user);
+        if ($paymentId <= 0) {
+            throw new RuntimeException($payment->error ? $payment->error : 'BankSyncPostingPaymentCreateFailed');
+        }
+        if ($payment->fetch($paymentId, $user) <= 0) {
+            throw new RuntimeException('BankSyncPostingPaymentFetchFailed');
+        }
+        if ((int) $payment->fk_bank <= 0) {
+            throw new RuntimeException('BankSyncPostingBankLineCreateFailed');
+        }
+
+        return array(
+            'native_object_type' => 'payment_various',
+            'native_object_id' => (int) $paymentId,
+            'bank_line_id' => (int) $payment->fk_bank,
+        );
+    }
+
+    private function inferBankFeePaymentCode($transaction)
+    {
+        if (strtoupper(trim((string) $transaction->transaction_code)) === 'PPCF') return 'CB';
+        if (trim((string) $transaction->dolibarr_payment_code) !== '') return (string) $transaction->dolibarr_payment_code;
+
+        if (trim((string) $transaction->external_transaction_id) !== '') {
+            $sql = 'SELECT dolibarr_payment_code FROM '.$this->db->prefix().'banksync_transaction';
+            $sql .= ' WHERE entity = '.$this->entity;
+            $sql .= ' AND rowid <> '.((int) $transaction->rowid);
+            $sql .= " AND provider = '".$this->db->escape((string) $transaction->provider)."'";
+            $sql .= " AND external_transaction_id = '".$this->db->escape((string) $transaction->external_transaction_id)."'";
+            $sql .= " AND dolibarr_payment_code IS NOT NULL AND dolibarr_payment_code <> ''";
+            $sql .= ' ORDER BY rowid ASC LIMIT 1';
+            $resql = $this->db->query($sql);
+            if ($resql) {
+                $obj = $this->db->fetch_object($resql);
+                $this->db->free($resql);
+                if ($obj && trim((string) $obj->dolibarr_payment_code) !== '') return (string) $obj->dolibarr_payment_code;
+            }
+        }
+
+        return 'VIR';
+    }
+
+    private function bankReference($transaction)
+    {
+        if (trim((string) $transaction->external_transaction_id) !== '') return (string) $transaction->external_transaction_id;
+        if (trim((string) $transaction->external_entry_id) !== '') return (string) $transaction->external_entry_id;
+        return (string) $transaction->reference;
+    }
+
+    private function auditNote($transaction)
+    {
+        $parts = array('BankSync #'.((int) $transaction->rowid));
+        if (trim((string) $transaction->provider) !== '') $parts[] = 'provider='.(string) $transaction->provider;
+        if (trim((string) $transaction->external_entry_id) !== '') $parts[] = 'entry='.(string) $transaction->external_entry_id;
+        if (trim((string) $transaction->reference) !== '') $parts[] = 'reference='.(string) $transaction->reference;
+        return implode(' | ', $parts);
+    }
+
+    private function sqlDateToTimestamp($date)
+    {
+        $parts = explode('-', trim((string) $date));
+        if (count($parts) !== 3) throw new RuntimeException('BankSyncPostingInvalidDate');
+        return dol_mktime(12, 0, 0, (int) $parts[1], (int) $parts[2], (int) $parts[0]);
     }
 }
