@@ -21,18 +21,36 @@ if (!$user->admin) {
     accessforbidden();
 }
 
+$action = GETPOST('action', 'aZ09');
+if ($action === 'save') {
+    $feeAccount = GETPOST('BANKSYNC_BANK_FEE_ACCOUNTANCY_CODE', 'alphanohtml');
+    $resconst = dolibarr_set_const($db, 'BANKSYNC_BANK_FEE_ACCOUNTANCY_CODE', trim((string) $feeAccount), 'chaine', 0, '', (int) $conf->entity);
+    if ($resconst > 0) {
+        setEventMessages($langs->trans('BankSyncSetupSaved'), null, 'mesgs');
+    } else {
+        setEventMessages($langs->trans('BankSyncSetupSaveFailed'), null, 'errors');
+    }
+}
+
 llxHeader('', $langs->trans('BankSyncSetup'));
 
 $head = banksyncAdminPrepareHead();
 print dol_get_fiche_head($head, 'settings', $langs->trans('BankSync'), -1, 'bank');
 
 print '<div class="opacitymedium">'.$langs->trans('BankSyncSetupHelp').'</div><br>';
+print '<form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
+print '<input type="hidden" name="token" value="'.newToken().'">';
+print '<input type="hidden" name="action" value="save">';
 print '<table class="noborder centpercent">';
 print '<tr class="liste_titre"><th>'.$langs->trans('Parameter').'</th><th>'.$langs->trans('Value').'</th></tr>';
-print '<tr class="oddeven"><td>'.$langs->trans('BankSyncVersion').'</td><td>0.4.0</td></tr>';
+print '<tr class="oddeven"><td>'.$langs->trans('BankSyncVersion').'</td><td>0.4.1</td></tr>';
 print '<tr class="oddeven"><td>'.$langs->trans('BankSyncAvailableProviders').'</td><td>BinX CSV</td></tr>';
-print '<tr class="oddeven"><td>'.$langs->trans('BankSyncPostingMode').'</td><td>'.$langs->trans('BankSyncStagingOnly').' + '.$langs->trans('BankSyncPostingPreview').'</td></tr>';
+print '<tr class="oddeven"><td>'.$langs->trans('BankSyncPostingMode').'</td><td>'.$langs->trans('BankSyncNativePostingMode').'</td></tr>';
+print '<tr class="oddeven"><td>'.$langs->trans('BankSyncBankFeeAccountancyCode').'<br><span class="opacitymedium">'.$langs->trans('BankSyncBankFeeAccountancyCodeHelp').'</span></td>';
+print '<td><input type="text" class="minwidth200" name="BANKSYNC_BANK_FEE_ACCOUNTANCY_CODE" value="'.dol_escape_htmltag(getDolGlobalString('BANKSYNC_BANK_FEE_ACCOUNTANCY_CODE')).'"></td></tr>';
 print '</table>';
+print '<div class="center"><button type="submit" class="button button-save">'.$langs->trans('Save').'</button></div>';
+print '</form>';
 
 print dol_get_fiche_end();
 llxFooter();
