@@ -190,6 +190,7 @@ BankSyncPostingTargetNotSupportedYet=This Dolibarr target object is not supporte
 BankSyncPostingMissingPaymentCode=The Dolibarr payment mode code is missing.
 BankSyncPostingPaymentCodeNotFound=The specified Dolibarr payment mode code was not found.
 BankSyncPostingBankFeeAccountancyCodeRequired=Accounting is enabled, so configure a general-ledger account for bank fees in Bank Sync setup before posting.
+BankSyncPostingBankFeeAccountancyCodeInvalid=The configured bank-fee accounting account cannot be used without an auxiliary account. Select a suitable general-ledger account in Bank Sync setup.
 BankSyncPostingMixedTargetTypes=Only native targets of the same type can currently be posted together for one bank transaction.
 BankSyncPostingInvalidAllocation=An invalid or zero allocation exists.
 BankSyncPostingInvoiceNotFound=A reconciled Dolibarr invoice could not be loaded.
