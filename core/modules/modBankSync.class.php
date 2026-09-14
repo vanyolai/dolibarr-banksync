@@ -23,7 +23,7 @@ class modBankSync extends DolibarrModules
         $this->name = preg_replace('/^mod/i', '', get_class($this));
         $this->description = 'BankSyncDescription';
         $this->descriptionlong = 'BankSyncDescriptionLong';
-        $this->version = '0.4.0';
+        $this->version = '0.4.1';
         $this->const_name = 'MAIN_MODULE_'.strtoupper($this->name);
         $this->picto = 'bank';
 
@@ -74,6 +74,13 @@ class modBankSync extends DolibarrModules
         $this->rights[$r][2] = 'w';
         $this->rights[$r][3] = 0;
         $this->rights[$r][4] = 'import';
+        $r++;
+
+        $this->rights[$r][0] = 5003013;
+        $this->rights[$r][1] = 'Post reconciled bank transactions into native Dolibarr records';
+        $this->rights[$r][2] = 'w';
+        $this->rights[$r][3] = 0;
+        $this->rights[$r][4] = 'post';
         $r++;
 
         $this->menu = array();
