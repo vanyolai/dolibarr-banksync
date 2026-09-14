@@ -1,8 +1,8 @@
 # Dolibarr BankSync
 
-BankSync is a Dolibarr external module for importing, classifying and reconciling bank transactions from multiple data sources through a provider-neutral staging layer.
+BankSync is a Dolibarr external module for importing, classifying, reconciling and posting bank transactions from multiple data sources through a provider-neutral staging layer.
 
-## Current status: 0.3.0
+## Current status: 0.4.1
 
 The first provider is **BinX CSV**. The module currently:
 
@@ -19,14 +19,18 @@ The first provider is **BinX CSV**. The module currently:
 - maps known BinX codes (`CDPT`, `DMCT`, `CAPA`, `CHRG`, `PPCF`) to provider-neutral event types and compatible native Dolibarr payment codes;
 - searches native Dolibarr customer invoices, supplier invoices, salaries and social-contribution/tax entries for reconciliation candidates;
 - scores candidates using amount, document reference, counterparty bank account, normalized name and date proximity;
-- keeps card transactions from using BinX card identifiers as partner bank-account evidence;
-- stores suggestions and human decisions in a generic N:N reconciliation model;
-- preserves confirmed/rejected decisions when candidates are recalculated;
-- provides a transaction-level reconciliation review page with confirm/reject actions;
-- provides a dashboard, source-account mapping page, import page, staged transaction list and bulk candidate scan;
-- **does not yet create native Dolibarr payment/bank records automatically**.
+- uses merchant-aware matching for card transactions where provider merchant text differs from the legal partner name;
+- stores suggestions and human decisions in a generic N:N reconciliation/allocation model;
+- supports partial payments and one bank transaction allocated across multiple invoices;
+- provides manual reconciliation search when automatic matching produces no useful candidate;
+- provides filtering, numbered pagination and list-position restoration during sequential reconciliation;
+- provides a read-only native posting preview before any Dolibarr core mutation;
+- can explicitly post confirmed company-currency customer/supplier invoice payments through native `Paiement` / `PaiementFourn` APIs;
+- can explicitly post bank fees through native `PaymentVarious`, which creates its linked Dolibarr bank line;
+- stores a BankSync posting audit record with a unique transaction boundary so the same bank transaction cannot be posted twice;
+- never writes directly to Dolibarr core business tables when a native domain API exists.
 
-This staging-first design intentionally separates ingestion, bank-event classification, reconciliation and posting. Future providers (Wise API, CAMT.053, MT940, other CSV formats or AISP APIs) can feed the same normalized model.
+Native posting is deliberately **manual and explicit**: reconciliation does not automatically create payments. A user reviews the posting preview and then confirms the real Dolibarr operation separately.
 
 ## Repository and development model
 
@@ -42,8 +46,6 @@ branch:     23.0
 prefix:     htdocs/custom/banksync
 ```
 
-The copy under `htdocs/custom/banksync` in the Dolibarr repository is therefore a downstream integration copy. Do not develop or hot-fix the module there directly unless the change is immediately exported back to this repository.
-
 A local Dolibarr checkout can configure the source repository as a remote once:
 
 ```bash
@@ -51,16 +53,7 @@ git remote add banksync https://github.com/vanyolai/dolibarr-banksync.git
 git fetch banksync
 ```
 
-The initial subtree integration is performed with:
-
-```bash
-git subtree add \
-  --prefix=htdocs/custom/banksync \
-  banksync main \
-  --squash
-```
-
-After development has been committed and pushed to this repository, update the Dolibarr integration with:
+Update the Dolibarr integration with:
 
 ```bash
 git fetch banksync
@@ -70,35 +63,33 @@ git subtree pull \
   --squash
 ```
 
-This keeps the standalone module history clean while the Dolibarr repository records only explicit integration points and pins the exact BankSync source commit through Git subtree metadata.
-
-If a change is ever made inside the Dolibarr subtree first, export it back before continuing normal development:
+Normal development direction is **BankSync repository → Dolibarr subtree**. If a change is ever made inside the Dolibarr subtree first, export it back before continuing normal development:
 
 ```bash
 git subtree split --prefix=htdocs/custom/banksync -b banksync-export
 git push banksync banksync-export:main
 ```
 
-Normal development should follow the opposite direction: **BankSync repository → Dolibarr subtree**.
+## Installation and development upgrades
 
-## Installation
-
-In the integrated `vanyolai/dolibarr` checkout the module is already located at:
+In the integrated `vanyolai/dolibarr` checkout the module is located at:
 
 ```text
 htdocs/custom/banksync/
 ```
 
-For an independent Dolibarr installation that does not consume the parent repository, cloning this repository directly into that location also works:
+For an independent installation:
 
 ```bash
 cd /path/to/dolibarr/htdocs/custom
 git clone https://github.com/vanyolai/dolibarr-banksync.git banksync
 ```
 
-Then open **Home → Setup → Modules/Applications**, find **Bank Sync**, and enable it. Dolibarr will create the staging tables automatically.
+Then open **Home → Setup → Modules/Applications**, find **Bank Sync**, and enable it.
 
-Development upgrades from 0.1.x are migrated lazily on first BankSync page access. The current migration helper targets MariaDB/MySQL, matching the deployment environment.
+Development schema changes are migrated lazily by `BankSyncSchema` on BankSync page access. Releases that introduce new Dolibarr permissions should also have the module reinitialized (disable/enable in a development installation) so Dolibarr creates the new permission definitions.
+
+Version 0.4.1 adds a dedicated `post` permission for native posting. Grant it only to users who should be allowed to create real Dolibarr payments/bank entries.
 
 ## BinX CSV format
 
@@ -118,10 +109,8 @@ Required transaction columns are validated by name, so malformed or incompatible
 
 ## Account mapping
 
-A provider account is represented independently from the native Dolibarr bank account:
-
 ```text
-BinX source account
+provider source account
        │
        ▼
 llx_banksync_account
@@ -130,11 +119,11 @@ llx_banksync_account
 llx_bank_account
 ```
 
-The source account number is normalized for matching. If exactly one open Dolibarr bank account has the same normalized account number or IBAN and a compatible currency, BankSync stores it as a **suggestion only**. A user must confirm the mapping before later posting logic may use it.
+If exactly one open Dolibarr bank account has the same normalized account number or IBAN and a compatible currency, BankSync stores it as a **suggestion only**. A user must confirm the mapping before posting may use it.
 
 ## Transaction classification
 
-Bank-event classification is deliberately separate from business reconciliation. For example, `transfer` describes how money moved, while the same transaction may later reconcile to a supplier invoice, salary or tax payment.
+Bank-event classification is deliberately separate from business reconciliation. `transfer` or `card` describes how money moved; reconciliation describes what business object the movement settles.
 
 Current normalized event types include:
 
@@ -150,21 +139,21 @@ refund
 other
 ```
 
-Current exact BinX mappings are:
+Current exact BinX mappings:
 
 ```text
 CDPT -> transfer -> VIR
 DMCT -> transfer -> VIR
 CAPA -> card     -> CB
 CHRG -> bank_fee
-PPCF -> bank_fee
+PPCF -> bank_fee / card fee -> CB when posted
 ```
 
-Exact provider codes take precedence over heuristic text classification.
+For a `CHRG` companion fee, native posting may inherit the compatible payment mode from another BinX row sharing the same external transaction ID; otherwise it falls back to `VIR`.
 
-## Reconciliation model
+## Reconciliation and allocation
 
-`llx_banksync_match` is an N:N allocation table between one bank transaction and one or more Dolibarr targets. Target types are intentionally polymorphic, including:
+`llx_banksync_match` is an N:N allocation table between one bank transaction and one or more Dolibarr targets. Target types include:
 
 ```text
 customer_invoice
@@ -178,22 +167,81 @@ internal_transfer
 other
 ```
 
-The 0.3.0 candidate matcher currently searches:
+Candidate confidence is calculated from independent signals such as exact/near amount, invoice reference in the bank reference, partner bank-account match, normalized partner/employee name and date proximity. Suggestions are advisory and require explicit confirmation, including 100% candidates.
 
-- incoming transfers against open customer invoices;
-- outgoing transfers, cards and direct debits against open supplier invoices;
-- outgoing transfers against unpaid salary records;
-- outgoing transfers against unpaid `ChargeSociales` tax/social-contribution records.
+Transaction reconciliation states are:
 
-Candidate confidence is calculated from independent signals such as exact/near amount, invoice reference in the bank reference, partner bank-account match, normalized partner/employee name and date proximity. Suggestions are advisory and require explicit confirmation. Confirming a candidate changes only BankSync reconciliation state (`new` -> `matched`); it does not yet create or alter a native Dolibarr payment.
+```text
+new
+partially_matched
+matched
+posted
+```
 
-This model allows one payment to settle multiple invoices and supports partial payments without coupling provider-specific structures to Dolibarr business objects.
+HUF reconciliation tolerates up to ±1 HUF for matching status; other currencies currently tolerate ±0.01. A non-zero tolerated difference remains visible and **blocks native posting** until an accountant-approved rounding rule is implemented.
+
+## Native posting
+
+Posting is a separate explicit workflow:
+
+```text
+import
+  -> classification
+  -> candidate matching
+  -> human-confirmed allocations
+  -> posting preview
+  -> explicit confirmation
+  -> native Dolibarr objects
+```
+
+Current native targets:
+
+```text
+customer invoice
+  -> Paiement::create()
+  -> Paiement::addPaymentToBank()
+
+supplier invoice
+  -> PaiementFourn::create()
+  -> PaiementFourn::addPaymentToBank()
+
+bank fee
+  -> PaymentVarious::create()
+  -> native linked bank line
+```
+
+BankSync does not issue raw `INSERT`/`UPDATE` statements against Dolibarr core business tables for these operations. Core mutations are performed by Dolibarr's own domain objects. BankSync SQL writes are confined to its own staging, reconciliation and audit tables.
+
+Posting is wrapped in an outer DoliDB transaction together with the BankSync audit/status update. Dolibarr's nested transaction depth keeps the native object operations inside the same atomic database transaction.
+
+### Idempotency
+
+`llx_banksync_posting` has a unique constraint on:
+
+```text
+(entity, fk_transaction)
+```
+
+It stores the native object type/id and the created native bank-line id. A second submit for an already-posted BankSync transaction is rejected and the posting preview becomes an audit view linked to the created native object.
+
+### Current posting restrictions
+
+The first native-posting milestone intentionally blocks:
+
+- foreign-currency transactions (until an explicit exchange-rate workflow exists);
+- credit-note settlement (until signed allocations are implemented);
+- mixed native target types in one transaction;
+- invoice allocations spanning multiple third parties in one native payment;
+- non-zero rounding differences even if they are within reconciliation tolerance;
+- allocations that exceed the invoice's current outstanding amount.
+
+If Dolibarr Accounting is enabled, bank-fee posting requires an explicit **Bank fee accounting account** in BankSync setup. The value must be agreed with the accountant; BankSync does not guess an accounting account.
 
 ## Deduplication model
 
-`Tranzakció azonosító` from BinX is stored as `external_transaction_id`, but it is **not assumed to be unique per accounting row**.
+BinX `Tranzakció azonosító` is stored as `external_transaction_id`, but is **not assumed to be unique per accounting row**.
 
-BankSync derives `external_entry_id` as a SHA-256 fingerprint from the normalized accounting entry. The database uniqueness constraint is:
+BankSync derives `external_entry_id` as a SHA-256 fingerprint from the normalized accounting entry. The staging uniqueness constraint is:
 
 ```text
 (entity, provider, account_number, external_entry_id)
@@ -228,8 +276,12 @@ MT940 ──────────┘              │
                          human confirmation
                                │
                                ▼
+                         posting preview
+                               │
+                      explicit confirmation
+                               │
+                               ▼
                   native Dolibarr payment/posting
-                            (next layer)
 ```
 
 Provider-specific structures must not leak into reconciliation logic. The raw source row is retained as JSON for diagnostics and future migrations.
@@ -243,15 +295,17 @@ php tests/binx_parser_smoke.php
 php tests/classifier_smoke.php
 ```
 
+GitHub Actions also runs `php -l` against every PHP file on pushes and pull requests.
+
 ## Roadmap
 
-1. Validate and tune candidate scoring against real BinX transactions and Dolibarr objects.
-2. Add editable split/partial allocations so one bank transaction can confirm multiple invoice targets safely.
-3. Add native customer/supplier invoice posting through `Paiement` / `PaiementFourn` and mark fully settled invoices paid.
-4. Add native salary posting through `PaymentSalary`.
-5. Add native social-contribution/tax posting through `PaymentSocialContribution` / `ChargeSociales`.
-6. Add controlled posting for bank fees, internal transfers and unmatched generic bank entries.
-7. Add posting idempotency and audit/reversal workflow.
+1. Validate native customer/supplier invoice posting against real full and partial payments.
+2. Validate `PaymentVarious` bank-fee posting and settle the accounting account with the accountant.
+3. Implement signed credit-note settlement components.
+4. Implement native salary posting through `PaymentSalary`.
+5. Implement native social-contribution/tax posting through the corresponding Dolibarr workflow.
+6. Add controlled internal-transfer and unmatched-generic-bank workflows.
+7. Add explicit reversal/unposting assistance while preserving audit history.
 8. Add a Wise API provider.
 9. Add CAMT.053 / MT940 statement providers.
 
