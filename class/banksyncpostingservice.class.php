@@ -418,9 +418,15 @@ class BankSyncPostingService
 
     private function bankReference($transaction)
     {
-        if (trim((string) $transaction->external_transaction_id) !== '') return (string) $transaction->external_transaction_id;
-        if (trim((string) $transaction->external_entry_id) !== '') return (string) $transaction->external_entry_id;
-        return (string) $transaction->reference;
+        $value = trim((string) $transaction->reference);
+        if ($value === '') $value = trim((string) $transaction->external_transaction_id);
+        if ($value === '') $value = trim((string) $transaction->external_entry_id);
+
+        // Dolibarr stores payment references in varchar(50) fields (num_payment /
+        // bank.num_chq). Keep the human bank reference there; the full raw/audit
+        // identifiers remain in BankSync staging and note_private.
+        if (function_exists('mb_substr')) return mb_substr($value, 0, 50, 'UTF-8');
+        return substr($value, 0, 50);
     }
 
     private function auditNote($transaction)
