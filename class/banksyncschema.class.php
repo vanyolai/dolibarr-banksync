@@ -10,7 +10,7 @@
  */
 class BankSyncSchema
 {
-    const VERSION = '0.2.0';
+    const VERSION = '0.4.1';
 
     /**
      * @param DoliDB $db Database handler
@@ -57,6 +57,23 @@ class BankSyncSchema
             ." tms TIMESTAMP\n"
             .") ENGINE=innodb");
 
+        self::query($db, "CREATE TABLE IF NOT EXISTS {$prefix}banksync_posting (\n"
+            ." rowid INTEGER AUTO_INCREMENT PRIMARY KEY,\n"
+            ." entity INTEGER DEFAULT 1 NOT NULL,\n"
+            ." fk_transaction INTEGER NOT NULL,\n"
+            ." posting_kind VARCHAR(64) NOT NULL,\n"
+            ." native_object_type VARCHAR(64),\n"
+            ." native_object_id INTEGER,\n"
+            ." fk_bank INTEGER,\n"
+            ." status VARCHAR(32) DEFAULT 'processing' NOT NULL,\n"
+            ." error_message TEXT,\n"
+            ." date_creation DATETIME NOT NULL,\n"
+            ." date_posted DATETIME,\n"
+            ." fk_user_create INTEGER,\n"
+            ." fk_user_post INTEGER,\n"
+            ." tms TIMESTAMP\n"
+            .") ENGINE=innodb");
+
         self::ensureColumn($db, $prefix.'banksync_import', 'fk_banksync_account', 'INTEGER NULL');
         self::ensureColumn($db, $prefix.'banksync_transaction', 'fk_banksync_account', 'INTEGER NULL');
         self::ensureColumn($db, $prefix.'banksync_transaction', 'bank_event_type', 'VARCHAR(32) NULL');
@@ -77,6 +94,12 @@ class BankSyncSchema
             'KEY idx_banksync_transaction_source_account (fk_banksync_account)');
         self::ensureIndex($db, $prefix.'banksync_transaction', 'idx_banksync_transaction_event_type',
             'KEY idx_banksync_transaction_event_type (bank_event_type)');
+        self::ensureIndex($db, $prefix.'banksync_posting', 'uk_banksync_posting_transaction',
+            'UNIQUE KEY uk_banksync_posting_transaction (entity, fk_transaction)');
+        self::ensureIndex($db, $prefix.'banksync_posting', 'idx_banksync_posting_native',
+            'KEY idx_banksync_posting_native (native_object_type, native_object_id)');
+        self::ensureIndex($db, $prefix.'banksync_posting', 'idx_banksync_posting_bank',
+            'KEY idx_banksync_posting_bank (fk_bank)');
     }
 
     private static function ensureColumn($db, $table, $column, $definition)
