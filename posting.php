@@ -25,6 +25,8 @@ try {
 }
 
 $transactionId = GETPOSTINT('id');
+$action = GETPOST('action', 'aZ09');
+$confirm = GETPOST('confirm', 'alpha');
 if ($transactionId <= 0) accessforbidden('Missing transaction id.');
 
 $matcher = new BankSyncCandidateMatcher($db, (int) $conf->entity);
@@ -39,6 +41,7 @@ try {
         'postable' => false,
         'kind' => '',
         'payment_code' => '',
+        'payment_mode_id' => 0,
         'bank_account_id' => 0,
         'bank_account_label' => '',
         'bank_amount' => abs((float) $transaction->amount),
@@ -51,6 +54,8 @@ try {
         'warnings' => array(),
         'errors' => array($e->getMessage()),
         'rounding_difference' => 0.0,
+        'existing_posting' => null,
+        'bank_fee_accountancy_code' => '',
     );
 }
 
@@ -74,6 +79,59 @@ function banksyncPostingOperationLabel($langs, $kind)
     }
 }
 
+function banksyncCanNativePost($user, $kind)
+{
+    if (!$user->hasRight('banksync', 'post')) return false;
+
+    if ((string) $kind === BankSyncMatchManager::TARGET_CUSTOMER_INVOICE) {
+        return $user->hasRight('facture', 'paiement');
+    }
+    if ((string) $kind === BankSyncMatchManager::TARGET_SUPPLIER_INVOICE) {
+        return ($user->hasRight('fournisseur', 'facture', 'creer') || $user->hasRight('supplier_invoice', 'creer'));
+    }
+    if ((string) $kind === BankSyncMatchManager::TARGET_BANK_FEE) {
+        return $user->hasRight('banque', 'modifier');
+    }
+    return false;
+}
+
+function banksyncNativeObjectUrl($posting)
+{
+    if (!$posting || (int) $posting->native_object_id <= 0) return '';
+    switch ((string) $posting->native_object_type) {
+        case 'payment':
+            return '/compta/paiement/card.php?id='.(int) $posting->native_object_id;
+        case 'payment_supplier':
+            return '/fourn/paiement/card.php?id='.(int) $posting->native_object_id;
+        case 'payment_various':
+            return '/compta/bank/various_payment/card.php?id='.(int) $posting->native_object_id;
+        default:
+            return '';
+    }
+}
+
+$canPost = banksyncCanNativePost($user, (string) $preview['kind']);
+
+if ($action === 'post' && $confirm === 'yes') {
+    if (!$canPost) accessforbidden($langs->trans('BankSyncPostingNoPermission'));
+    try {
+        $result = $posting->post($transaction, $user);
+        setEventMessages($langs->trans('BankSyncPostingSuccess', (int) $result['native_object_id'], (int) $result['bank_line_id']), null, 'mesgs');
+        header('Location: '.dol_buildpath('/banksync/posting.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.$transactionId);
+        exit;
+    } catch (Throwable $e) {
+        setEventMessages($langs->trans('BankSyncPostingFailed', banksyncPostingMessage($langs, $e->getMessage())), null, 'errors');
+        // Rebuild preview in case the failed attempt changed nothing and can be retried.
+        try {
+            $preview = $posting->buildPreview($transaction);
+        } catch (Throwable $ignored) {
+        }
+    }
+}
+
+$existingPosting = isset($preview['existing_posting']) ? $preview['existing_posting'] : null;
+$alreadyPosted = ($existingPosting && (string) $existingPosting->status === 'posted');
+
 llxHeader('', $langs->trans('BankSyncPostingPreview'));
 print load_fiche_titre($langs->trans('BankSyncPostingPreview').' #'.$transactionId, '', 'bank');
 
@@ -82,6 +140,18 @@ print '<a class="butAction" href="'.dol_buildpath('/banksync/reconcile.php', 1).
 print '</div>';
 
 print '<div class="info">'.$langs->trans('BankSyncPostingPreviewHelp').'</div><br>';
+
+if ($alreadyPosted) {
+    $nativeUrl = banksyncNativeObjectUrl($existingPosting);
+    print '<div class="ok">'.$langs->trans('BankSyncPostingAlreadyPostedInfo').' ';
+    if ($nativeUrl !== '') {
+        print '<a href="'.dol_buildpath($nativeUrl, 1).'">'.$langs->trans('BankSyncPostingOpenNativeObject').' #'.((int) $existingPosting->native_object_id).'</a>';
+    } else {
+        print '#'.((int) $existingPosting->native_object_id);
+    }
+    if ((int) $existingPosting->fk_bank > 0) print ' · '.$langs->trans('BankSyncPostingBankLine').' #'.((int) $existingPosting->fk_bank);
+    print '</div><br>';
+}
 
 print '<table class="border centpercent">';
 print '<tr><td class="titlefield">'.$langs->trans('BankSyncBookingDate').'</td><td>'.dol_escape_htmltag((string) $preview['booking_date']).'</td></tr>';
@@ -94,8 +164,13 @@ print '<tr><td>'.$langs->trans('BankSyncPostingPlannedOperation').'</td><td><str
 if (!empty($preview['payment_code'])) {
     print '<tr><td>'.$langs->trans('BankSyncPostingPaymentCode').'</td><td>'.dol_escape_htmltag((string) $preview['payment_code']).'</td></tr>';
 }
+if ((string) $preview['kind'] === BankSyncMatchManager::TARGET_BANK_FEE && trim((string) $preview['bank_fee_accountancy_code']) !== '') {
+    print '<tr><td>'.$langs->trans('BankSyncBankFeeAccountancyCode').'</td><td>'.dol_escape_htmltag((string) $preview['bank_fee_accountancy_code']).'</td></tr>';
+}
 print '<tr><td>'.$langs->trans('Status').'</td><td>';
-if (!empty($preview['postable'])) {
+if ($alreadyPosted) {
+    print '<span class="badge badge-status6">'.$langs->trans('BankSyncTransactionStatus_posted').'</span>';
+} elseif (!empty($preview['postable'])) {
     print '<span class="badge badge-status4">'.$langs->trans('BankSyncPostingReady').'</span>';
 } else {
     print '<span class="badge badge-status1">'.$langs->trans('BankSyncPostingBlocked').'</span>';
@@ -104,10 +179,17 @@ print '</td></tr>';
 print '</table>';
 
 if (!empty($preview['errors'])) {
-    print '<br>'.load_fiche_titre($langs->trans('Errors'), '', 'error');
-    print '<div class="error">';
-    foreach (array_unique($preview['errors']) as $message) print '<div>'.dol_escape_htmltag(banksyncPostingMessage($langs, $message)).'</div>';
-    print '</div>';
+    $visibleErrors = array();
+    foreach (array_unique($preview['errors']) as $message) {
+        if ($alreadyPosted && (string) $message === 'BankSyncPostingAlreadyPosted') continue;
+        $visibleErrors[] = $message;
+    }
+    if (!empty($visibleErrors)) {
+        print '<br>'.load_fiche_titre($langs->trans('Errors'), '', 'error');
+        print '<div class="error">';
+        foreach ($visibleErrors as $message) print '<div>'.dol_escape_htmltag(banksyncPostingMessage($langs, $message)).'</div>';
+        print '</div>';
+    }
 }
 
 if (!empty($preview['warnings'])) {
@@ -139,6 +221,30 @@ print '</table></div>';
 
 if (abs((float) $preview['rounding_difference']) > 0.00001) {
     print '<br><div class="warning">'.$langs->trans('BankSyncRoundingDifference').': <strong>'.price(abs((float) $preview['rounding_difference'])).' '.dol_escape_htmltag((string) $preview['currency']).'</strong></div>';
+}
+
+if ($action === 'ask_post' && !empty($preview['postable']) && !$alreadyPosted) {
+    if ($canPost) {
+        print '<br><div class="warning"><strong>'.$langs->trans('BankSyncPostConfirmTitle').'</strong><br>'.$langs->trans('BankSyncPostConfirmQuestion').'</div>';
+        print '<div class="center">';
+        print '<form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'" class="inline-block">';
+        print '<input type="hidden" name="token" value="'.newToken().'">';
+        print '<input type="hidden" name="mainmenu" value="bank"><input type="hidden" name="leftmenu" value="banksync_transactions">';
+        print '<input type="hidden" name="id" value="'.$transactionId.'"><input type="hidden" name="action" value="post"><input type="hidden" name="confirm" value="yes">';
+        print '<button type="submit" class="button button-save">'.$langs->trans('BankSyncPostConfirmButton').'</button></form> ';
+        print '<a class="button" href="'.dol_buildpath('/banksync/posting.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.$transactionId.'">'.$langs->trans('Cancel').'</a>';
+        print '</div>';
+    } else {
+        print '<br><div class="warning">'.$langs->trans('BankSyncPostingNoPermission').'</div>';
+    }
+} elseif (!empty($preview['postable']) && !$alreadyPosted) {
+    print '<br><div class="center">';
+    if ($canPost) {
+        print '<a class="butAction" href="'.dol_buildpath('/banksync/posting.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.$transactionId.'&action=ask_post">'.$langs->trans('BankSyncPostNow').'</a>';
+    } else {
+        print '<span class="opacitymedium">'.$langs->trans('BankSyncPostingNoPermission').'</span>';
+    }
+    print '</div>';
 }
 
 print '<br><div class="opacitymedium">'.$langs->trans('BankSyncPostingPreviewOnly').'</div>';
