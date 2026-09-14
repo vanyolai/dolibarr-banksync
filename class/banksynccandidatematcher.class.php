@@ -366,15 +366,15 @@ class BankSyncCandidateMatcher
     private function findSalaries($transaction)
     {
         $rows = array();
-        $dateFilter = $this->dateFilter('s.datep', (string) $transaction->booking_date, 180, 45);
+        $periodFilter = $this->dateFilter('COALESCE(s.dateep, s.datesp, s.datep)', (string) $transaction->booking_date, 180, 45);
         $sql = 'SELECT s.rowid, s.ref, s.datep, s.datev, s.amount, s.label, s.datesp, s.dateep, s.fk_user,';
         $sql .= ' u.firstname, u.lastname,';
         $sql .= ' COALESCE((SELECT SUM(ps.amount) FROM '.$this->db->prefix().'payment_salary AS ps WHERE ps.fk_salary = s.rowid), 0) AS paid_amount';
         $sql .= ' FROM '.$this->db->prefix().'salary AS s';
         $sql .= ' INNER JOIN '.$this->db->prefix().'user AS u ON u.rowid = s.fk_user';
         $sql .= ' WHERE s.entity = '.$this->entity.' AND s.paye = 0 AND s.amount > 0';
-        $sql .= $dateFilter;
-        $sql .= ' ORDER BY s.datep DESC, s.rowid DESC';
+        $sql .= $periodFilter;
+        $sql .= ' ORDER BY COALESCE(s.dateep, s.datesp, s.datep) DESC, s.rowid DESC';
         $sql .= $this->db->plimit(150, 0);
         $resql = $this->db->query($sql);
         if (!$resql) {
@@ -382,7 +382,7 @@ class BankSyncCandidateMatcher
         }
 
         $bankText = $this->normalizeText((string) $transaction->counterparty_name.' '.(string) $transaction->reference);
-        $salaryMarker = $this->containsAny($bankText, array('munkaber', 'berfizetes', 'salary', 'wage'));
+        $salaryMarker = $this->containsAny($bankText, array('munkaber', 'berfizetes', 'salary', 'wage', 'payroll'));
         $amount = abs((float) $transaction->amount);
 
         while ($obj = $this->db->fetch_object($resql)) {
@@ -398,6 +398,10 @@ class BankSyncCandidateMatcher
                 $score += 45;
                 $reasons[] = 'Exact amount';
                 $reasonCodes[] = 'amount';
+            } elseif ($remaining > 0 && $amount > 0 && abs($amount - $remaining) / max($amount, $remaining) <= 0.02) {
+                $score += 20;
+                $reasons[] = 'Amount within 2%';
+                $reasonCodes[] = 'amount_near';
             }
             if ($salaryMarker) {
                 $score += 25;
@@ -417,15 +421,26 @@ class BankSyncCandidateMatcher
                 $reasonCodes[] = 'employee_similar';
             }
 
-            $days = $this->dayDistance((string) $transaction->booking_date, (string) $obj->datep);
-            if ($days !== null && $days <= 31) {
+            $periodStart = (string) $obj->datesp;
+            $periodEnd = (string) $obj->dateep;
+            $periodDate = trim($periodEnd) !== '' ? $periodEnd : (trim($periodStart) !== '' ? $periodStart : (string) $obj->datep);
+            $days = $this->dayDistance((string) $transaction->booking_date, $periodDate);
+            if ($days !== null && $days <= 10) {
+                $score += 20;
+                $reasons[] = 'Salary period close to bank date';
+                $reasonCodes[] = 'salary_period';
+            } elseif ($days !== null && $days <= 31) {
                 $score += 10;
-                $reasons[] = 'Payment date proximity';
+                $reasons[] = 'Salary period near bank date';
                 $reasonCodes[] = 'date';
+            } elseif ($days !== null && $days <= 62) {
+                $score += 5;
+                $reasons[] = 'Salary period within 62 days';
+                $reasonCodes[] = 'date_near';
             }
 
             $score = min(100, $score);
-            if ($score < 50) {
+            if ($score < 45) {
                 continue;
             }
 
@@ -434,12 +449,16 @@ class BankSyncCandidateMatcher
                 'target_id' => (int) $obj->rowid,
                 'ref' => trim((string) $obj->ref) !== '' ? (string) $obj->ref : '#'.(int) $obj->rowid,
                 'label' => $employee,
-                'date' => (string) $obj->datep,
+                'date' => $this->salaryPeriodLabel($periodStart, $periodEnd, (string) $obj->datep),
+                'period_start' => $periodStart,
+                'period_end' => $periodEnd,
                 'remaining_amount' => $this->decimalString($remaining),
                 'allocated_amount' => $this->decimalString(min($amount, $remaining)),
                 'confidence' => $score,
                 'reasons' => $reasons,
                 'reason_codes' => $reasonCodes,
+                'date_distance' => $days === null ? PHP_INT_MAX : $days,
+                'amount_distance' => abs($amount - $remaining),
                 'url' => '/salaries/card.php?id='.(int) $obj->rowid,
             );
         }
@@ -647,6 +666,16 @@ class BankSyncCandidateMatcher
             return null;
         }
         return (int) floor(abs($a - $b) / 86400);
+    }
+
+    private function salaryPeriodLabel($start, $end, $fallback = '')
+    {
+        $start = trim((string) $start);
+        $end = trim((string) $end);
+        if ($start !== '' && $end !== '') return $start.' – '.$end;
+        if ($start !== '') return $start;
+        if ($end !== '') return $end;
+        return trim((string) $fallback);
     }
 
     private function moneyEquals($a, $b)
