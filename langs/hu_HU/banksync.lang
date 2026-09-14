@@ -190,6 +190,7 @@ BankSyncPostingTargetNotSupportedYet=Ez a Dolibarr célobjektum még nem támoga
 BankSyncPostingMissingPaymentCode=Hiányzik a Dolibarr fizetési mód kódja.
 BankSyncPostingPaymentCodeNotFound=A megadott Dolibarr fizetési mód kódja nem található.
 BankSyncPostingBankFeeAccountancyCodeRequired=A Könyvelés modul aktív, ezért a bankköltséghez előbb állíts be főkönyvi számlát a BankSync beállításaiban.
+BankSyncPostingBankFeeAccountancyCodeInvalid=A megadott bankköltség főkönyvi számla nem használható segédkönyvi számla nélkül. Válassz megfelelő főkönyvi számlát a BankSync beállításaiban.
 BankSyncPostingMixedTargetTypes=Egy banki tranzakción belül jelenleg csak azonos típusú natív célobjektumok könyvelhetők együtt.
 BankSyncPostingInvalidAllocation=Érvénytelen vagy nulla allokáció található.
 BankSyncPostingInvoiceNotFound=Az egyeztetett Dolibarr számla nem tölthető be.
