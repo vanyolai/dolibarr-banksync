@@ -23,8 +23,8 @@ Current exact BinX mappings:
 - `CDPT` -> transfer -> Dolibarr payment code `VIR`
 - `DMCT` -> transfer -> Dolibarr payment code `VIR`
 - `CAPA` -> card -> Dolibarr payment code `CB`
-- `CHRG` -> bank fee -> no Dolibarr payment code
-- `PPCF` -> bank fee -> no Dolibarr payment code
+- `CHRG` -> bank fee -> no direct payment code; posting may inherit the payment mode from its grouped companion transaction, otherwise falls back to `VIR`
+- `PPCF` -> card fee -> native bank-fee posting uses payment code `CB`
 
 Notes:
 
@@ -64,25 +64,28 @@ Notes:
   - HUF: ±1 HUF
   - other currencies: ±0.01 currency units
 - If the difference is within tolerance, the transaction may be considered `matched`, but the difference must remain visible as a rounding difference and must not be silently discarded.
-- The later native posting layer must preserve bank-account accuracy; rounding differences may need their own accounting/bank adjustment depending on the accountant's preferred treatment.
+- Native posting must preserve bank-account accuracy; rounding differences may need their own accounting/bank adjustment depending on the accountant's preferred treatment.
 - Until an accountant-approved native rounding rule exists, a non-zero tolerated rounding difference may be shown as `matched` for reconciliation purposes but must block actual native posting.
 
 ## Posting policy
 
 - No automatic native Dolibarr posting from unconfirmed suggestions.
 - Native posting must use Dolibarr business/domain APIs where available, not direct SQL writes into Dolibarr core business tables.
-- Direct SQL is allowed for BankSync-owned staging/reconciliation tables.
+- Direct SQL is allowed for BankSync-owned staging/reconciliation/audit tables.
 - Read-only SELECTs against core tables may still be used by matching/search code where a suitable performant public API is not available, but core mutations must go through native Dolibarr objects/methods.
-- Planned native targets include:
+- Native targets currently implemented for the first posting milestone:
   - customer invoice -> `Paiement::create()` + `Paiement::addPaymentToBank()`
   - supplier invoice -> `PaiementFourn::create()` + inherited `addPaymentToBank()`
-  - salary -> `PaymentSalary` native workflow
-  - social contribution / tax -> `PaymentSocialContribution` or the corresponding native workflow
-  - bank fees -> `Account::addline()` native bank API
-- Posting must be idempotent; an already posted BankSync transaction must not be posted twice.
-- Posting uses an explicit preview/confirm workflow. The preview is read-only and must show the bank amount/account/date/payment mode and all target allocations before any core mutation is allowed.
+  - bank fees -> `PaymentVarious::create()`; Dolibarr itself creates and links the bank line through `Account::addline()`
+- Planned later native targets include salary (`PaymentSalary`) and social contribution/tax (`PaymentSocialContribution` or the corresponding native workflow).
+- Posting is always an explicit preview -> confirmation workflow. Viewing the preview never creates a native record.
+- Actual posting requires the dedicated BankSync `post` permission and the corresponding native Dolibarr permission.
+- Posting is idempotent. `llx_banksync_posting` has a unique `(entity, fk_transaction)` boundary and stores the resulting native object type/id plus native bank-line id. A transaction cannot be posted twice.
+- Native core writes and the BankSync posting audit/status updates are wrapped in one outer DoliDB transaction; Dolibarr's nested transaction depth keeps domain-object transactions inside that atomic boundary.
+- The first posting milestone supports company-currency transactions only. Foreign-currency posting remains blocked until an explicit exchange-rate workflow is implemented.
 - Initial invoice posting supports one native target type and one third party per bank transaction. Mixed target types or multiple third parties are blocked until a deliberate native workflow exists.
 - Credit-note posting is blocked until signed settlement components are implemented explicitly.
+- If the Accounting module is enabled, bank-fee posting requires an explicit `BANKSYNC_BANK_FEE_ACCOUNTANCY_CODE`. The value must be agreed with the accountant; BankSync must not invent an accounting account.
 
 ## UX principles
 
@@ -96,3 +99,4 @@ Notes:
 - Transaction lists should provide numbered pagination rather than only previous/next navigation.
 - Transaction-list filtering should cover at least booking-date range, bank-event type, transaction code, counterparty, bank reference and reconciliation status.
 - Posting preview is available only when a transaction is fully reconciled (`matched`) or when the transaction is a standalone bank fee that requires no business-object reconciliation.
+- After posting, the preview remains an audit view and links to the created native Dolibarr object; the posting action is no longer offered.
