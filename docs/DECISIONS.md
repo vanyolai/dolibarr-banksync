@@ -43,6 +43,9 @@ Notes:
 - Card transactions require merchant-aware matching because provider merchant text often differs from the legal Dolibarr partner name and card rows do not expose a usable partner IBAN.
 - For card transactions, a strong normalized merchant-name <-> partner-name match is sufficient to surface open supplier invoices as candidates even when amount/reference/date evidence is weak. Such candidates remain advisory and must still be confirmed manually.
 - Card candidate ranking should use amount proximity and date proximity to rank multiple open invoices from the same merchant, but weak amount/date evidence must not suppress an otherwise clear merchant relationship.
+- Salary matching uses the salary period (`salary.datesp` / `salary.dateep`) as its primary temporal evidence. `salary.datep` is the payment date and may be empty before the salary is paid, so it must not be the field that excludes an otherwise valid unpaid salary candidate.
+- For salary candidates, employee-name match, payroll wording in bank text (for example `munkabér`, `salary`, `payroll`), amount proximity and closeness to the salary-period end are independent advisory signals.
+- Salary candidates and manual salary search results must display the salary period (start–end) so recurring monthly salary objects for the same employee can be distinguished safely.
 
 ## Allocation model
 
