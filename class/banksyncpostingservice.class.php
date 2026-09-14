@@ -8,6 +8,7 @@ require_once DOL_DOCUMENT_ROOT.'/fourn/class/paiementfourn.class.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/bank/class/account.class.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/bank/class/paymentvarious.class.php';
 require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
+require_once DOL_DOCUMENT_ROOT.'/core/lib/accounting.lib.php';
 require_once __DIR__.'/banksyncmatchmanager.class.php';
 require_once __DIR__.'/banksyncpostingmanager.class.php';
 
@@ -70,9 +71,10 @@ class BankSyncPostingService
         );
 
         $existingPosting = $this->postingManager->getForTransaction((int) $transaction->rowid);
+        $existingIsPosted = $existingPosting && (string) $existingPosting->status === 'posted';
         if ($existingPosting) {
             $preview['existing_posting'] = $existingPosting;
-            $preview['errors'][] = ((string) $existingPosting->status === 'posted') ? 'BankSyncPostingAlreadyPosted' : 'BankSyncPostingAlreadyInProgress';
+            $preview['errors'][] = $existingIsPosted ? 'BankSyncPostingAlreadyPosted' : 'BankSyncPostingAlreadyInProgress';
         }
 
         if ($preview['bank_account_id'] <= 0) {
@@ -84,7 +86,7 @@ class BankSyncPostingService
             } else {
                 $preview['bank_account_label'] = trim((string) $account->label) !== '' ? (string) $account->label : (string) $account->ref;
                 $accountCurrency = trim((string) $account->currency_code);
-                if ($accountCurrency !== '' && strtoupper($accountCurrency) !== strtoupper($preview['currency'])) {
+                if (!$existingIsPosted && $accountCurrency !== '' && strtoupper($accountCurrency) !== strtoupper($preview['currency'])) {
                     $preview['errors'][] = 'BankSyncPostingBankCurrencyMismatch';
                 }
             }
@@ -92,7 +94,7 @@ class BankSyncPostingService
 
         // First native posting milestone intentionally supports company-currency
         // payments only. FX posting requires an explicit exchange-rate workflow.
-        if (strtoupper($preview['currency']) !== strtoupper((string) $conf->currency)) {
+        if (!$existingIsPosted && strtoupper($preview['currency']) !== strtoupper((string) $conf->currency)) {
             $preview['errors'][] = 'BankSyncPostingForeignCurrencyNotSupportedYet';
         }
 
@@ -102,11 +104,15 @@ class BankSyncPostingService
             $preview['kind'] = BankSyncMatchManager::TARGET_BANK_FEE;
             $preview['payment_code'] = $this->inferBankFeePaymentCode($transaction);
             $preview['payment_mode_id'] = (int) dol_getIdFromCode($this->db, $preview['payment_code'], 'c_paiement', 'code', 'id', 1);
-            if ($preview['payment_mode_id'] <= 0) $preview['errors'][] = 'BankSyncPostingPaymentCodeNotFound';
+            if (!$existingIsPosted && $preview['payment_mode_id'] <= 0) $preview['errors'][] = 'BankSyncPostingPaymentCodeNotFound';
 
             $preview['bank_fee_accountancy_code'] = getDolGlobalString('BANKSYNC_BANK_FEE_ACCOUNTANCY_CODE');
-            if (isModEnabled('accounting') && trim($preview['bank_fee_accountancy_code']) === '') {
-                $preview['errors'][] = 'BankSyncPostingBankFeeAccountancyCodeRequired';
+            if (!$existingIsPosted && isModEnabled('accounting')) {
+                if (trim($preview['bank_fee_accountancy_code']) === '') {
+                    $preview['errors'][] = 'BankSyncPostingBankFeeAccountancyCodeRequired';
+                } elseif (!checkGeneralAccountAllowsAuxiliary($this->db, (string) $preview['bank_fee_accountancy_code'], '')) {
+                    $preview['errors'][] = 'BankSyncPostingBankFeeAccountancyCodeInvalid';
+                }
             }
 
             $preview['rows'][] = array(
@@ -126,41 +132,51 @@ class BankSyncPostingService
 
         $summary = $this->matchManager->getAllocationSummary((int) $transaction->rowid);
         $preview['rounding_difference'] = (float) $summary['rounding_difference'];
-        if (empty($summary['balanced'])) {
+        if (!$existingIsPosted && empty($summary['balanced'])) {
             $preview['errors'][] = 'BankSyncPostingTransactionNotBalanced';
         }
         // Until an accountant-approved rounding posting rule exists, do not create
         // a native payment whose bank line would differ from the actual bank amount.
-        if (abs((float) $summary['rounding_difference']) > 0.00001) {
+        if (!$existingIsPosted && abs((float) $summary['rounding_difference']) > 0.00001) {
             $preview['errors'][] = 'BankSyncPostingRoundingPolicyRequired';
         }
 
-        $confirmed = array();
+        // Before posting, only confirmed matches are settlement inputs. After posting,
+        // the same rows have status=posted; include them so the audit preview remains
+        // useful and can reconstruct before/after balances without offering posting again.
+        $settlements = array();
         foreach ($this->matchManager->getForTransaction((int) $transaction->rowid) as $match) {
-            if ((string) $match->status === 'confirmed') $confirmed[] = $match;
-            if ((string) $match->status === 'posted') $preview['errors'][] = 'BankSyncPostingAlreadyPosted';
+            if ((string) $match->status === 'confirmed' || ($existingIsPosted && (string) $match->status === 'posted')) {
+                $settlements[] = $match;
+            } elseif ((string) $match->status === 'posted') {
+                $preview['errors'][] = 'BankSyncPostingAlreadyPosted';
+            }
         }
-        if (empty($confirmed)) {
-            $preview['errors'][] = 'BankSyncPostingNoConfirmedMatches';
+        if (empty($settlements)) {
+            if (!$existingIsPosted) $preview['errors'][] = 'BankSyncPostingNoConfirmedMatches';
             return $preview;
         }
 
-        $targetType = (string) $confirmed[0]->target_type;
+        $targetType = (string) $settlements[0]->target_type;
         if (!in_array($targetType, array(BankSyncMatchManager::TARGET_CUSTOMER_INVOICE, BankSyncMatchManager::TARGET_SUPPLIER_INVOICE), true)) {
             $preview['errors'][] = 'BankSyncPostingTargetNotSupportedYet';
             return $preview;
         }
         $preview['kind'] = $targetType;
         $preview['payment_code'] = trim((string) $transaction->dolibarr_payment_code);
-        if ($preview['payment_code'] === '') {
-            $preview['errors'][] = 'BankSyncPostingMissingPaymentCode';
-        } else {
+        if (!$existingIsPosted) {
+            if ($preview['payment_code'] === '') {
+                $preview['errors'][] = 'BankSyncPostingMissingPaymentCode';
+            } else {
+                $preview['payment_mode_id'] = (int) dol_getIdFromCode($this->db, $preview['payment_code'], 'c_paiement', 'code', 'id', 1);
+                if ($preview['payment_mode_id'] <= 0) $preview['errors'][] = 'BankSyncPostingPaymentCodeNotFound';
+            }
+        } elseif ($preview['payment_code'] !== '') {
             $preview['payment_mode_id'] = (int) dol_getIdFromCode($this->db, $preview['payment_code'], 'c_paiement', 'code', 'id', 1);
-            if ($preview['payment_mode_id'] <= 0) $preview['errors'][] = 'BankSyncPostingPaymentCodeNotFound';
         }
 
         $thirdpartyId = 0;
-        foreach ($confirmed as $match) {
+        foreach ($settlements as $match) {
             if ((string) $match->target_type !== $targetType) {
                 $preview['errors'][] = 'BankSyncPostingMixedTargetTypes';
                 continue;
@@ -206,10 +222,12 @@ class BankSyncPostingService
                 $preview['errors'][] = 'BankSyncPostingCreditNoteNotSupportedYet';
             }
 
-            if ($allocated - abs($remaining) > 0.00001) {
+            if (!$existingIsPosted && $allocated - abs($remaining) > 0.00001) {
                 $preview['errors'][] = 'BankSyncPostingAllocationExceedsCurrentRemaining';
             }
 
+            $remainingBefore = $existingIsPosted ? $remaining + $allocated : $remaining;
+            $remainingAfter = $existingIsPosted ? $remaining : $remaining - $allocated;
             $preview['rows'][] = array(
                 'target_type' => $targetType,
                 'target_id' => (int) $match->target_id,
@@ -217,16 +235,16 @@ class BankSyncPostingService
                 'label' => $label,
                 'thirdparty' => $label,
                 'allocated_amount' => $allocated,
-                'remaining_before' => $remaining,
-                'remaining_after' => $remaining - $allocated,
+                'remaining_before' => $remainingBefore,
+                'remaining_after' => $remainingAfter,
                 'url' => $url,
             );
         }
 
-        if ($targetType === BankSyncMatchManager::TARGET_CUSTOMER_INVOICE && (float) $transaction->amount < 0) {
+        if (!$existingIsPosted && $targetType === BankSyncMatchManager::TARGET_CUSTOMER_INVOICE && (float) $transaction->amount < 0) {
             $preview['errors'][] = 'BankSyncPostingUnexpectedDirection';
         }
-        if ($targetType === BankSyncMatchManager::TARGET_SUPPLIER_INVOICE && (float) $transaction->amount > 0) {
+        if (!$existingIsPosted && $targetType === BankSyncMatchManager::TARGET_SUPPLIER_INVOICE && (float) $transaction->amount > 0) {
             $preview['errors'][] = 'BankSyncPostingUnexpectedDirection';
         }
 
@@ -249,7 +267,11 @@ class BankSyncPostingService
             throw new RuntimeException(!empty($preview['errors']) ? (string) $preview['errors'][0] : 'BankSyncPostingBlocked');
         }
 
-        $this->db->begin();
+        // Dolibarr's DoliDB supports nested transaction depth. The native object
+        // methods below start/commit their own logical transaction levels; this
+        // outer level keeps native core writes and BankSync audit/status writes
+        // atomic as one database transaction.
+        $this->db->begin('BankSync native posting');
         try {
             $postingId = $this->postingManager->acquire((int) $transaction->rowid, (string) $preview['kind'], (int) $user->id);
 
@@ -264,7 +286,7 @@ class BankSyncPostingService
 
             $this->postingManager->markPosted($postingId, $native['native_object_type'], $native['native_object_id'], $native['bank_line_id'], (int) $user->id);
             $this->postingManager->markBankSyncObjectsPosted((int) $transaction->rowid, (int) $user->id);
-            $this->db->commit();
+            $this->db->commit('BankSync native posting');
 
             return array(
                 'posting_id' => $postingId,
@@ -273,7 +295,7 @@ class BankSyncPostingService
                 'bank_line_id' => $native['bank_line_id'],
             );
         } catch (Throwable $e) {
-            $this->db->rollback();
+            $this->db->rollback('BankSync native posting');
             throw $e;
         }
     }
