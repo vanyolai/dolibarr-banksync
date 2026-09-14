@@ -8,7 +8,7 @@ require_once DOL_DOCUMENT_ROOT.'/fourn/class/paiementfourn.class.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/bank/class/account.class.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/bank/class/paymentvarious.class.php';
 require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
-require_once DOL_DOCUMENT_ROOT.'/core/lib/accounting.lib.php';
+require_once DOL_DOCUMENT_ROOT.'/accountancy/class/accountingaccount.class.php';
 require_once __DIR__.'/banksyncmatchmanager.class.php';
 require_once __DIR__.'/banksyncpostingmanager.class.php';
 
@@ -38,12 +38,7 @@ class BankSyncPostingService
         $this->postingManager = new BankSyncPostingManager($db, $entity);
     }
 
-    /**
-     * Build a read-only posting preview.
-     *
-     * @param object $transaction BankSync staging transaction
-     * @return array<string,mixed>
-     */
+    /** @return array<string,mixed> */
     public function buildPreview($transaction)
     {
         global $conf;
@@ -92,14 +87,12 @@ class BankSyncPostingService
             }
         }
 
-        // First native posting milestone intentionally supports company-currency
-        // payments only. FX posting requires an explicit exchange-rate workflow.
         if (!$existingIsPosted && strtoupper($preview['currency']) !== strtoupper((string) $conf->currency)) {
             $preview['errors'][] = 'BankSyncPostingForeignCurrencyNotSupportedYet';
         }
 
-        // Bank fees are native miscellaneous payments. PaymentVarious itself creates
-        // and links the bank line through Account::addline().
+        // Bank fees use the native PaymentVarious object. PaymentVarious creates
+        // and links its own native bank line through Account::addline().
         if ((string) $transaction->bank_event_type === 'bank_fee') {
             $preview['kind'] = BankSyncMatchManager::TARGET_BANK_FEE;
             $preview['payment_code'] = $this->inferBankFeePaymentCode($transaction);
@@ -110,8 +103,12 @@ class BankSyncPostingService
             if (!$existingIsPosted && isModEnabled('accounting')) {
                 if (trim($preview['bank_fee_accountancy_code']) === '') {
                     $preview['errors'][] = 'BankSyncPostingBankFeeAccountancyCodeRequired';
-                } elseif (!checkGeneralAccountAllowsAuxiliary($this->db, (string) $preview['bank_fee_accountancy_code'], '')) {
-                    $preview['errors'][] = 'BankSyncPostingBankFeeAccountancyCodeInvalid';
+                } else {
+                    $accountingAccount = new AccountingAccount($this->db);
+                    $accountResult = $accountingAccount->fetch(0, (string) $preview['bank_fee_accountancy_code'], 1);
+                    if ($accountResult <= 0 || empty($accountingAccount->active)) {
+                        $preview['errors'][] = 'BankSyncPostingBankFeeAccountancyCodeInvalid';
+                    }
                 }
             }
 
@@ -135,15 +132,12 @@ class BankSyncPostingService
         if (!$existingIsPosted && empty($summary['balanced'])) {
             $preview['errors'][] = 'BankSyncPostingTransactionNotBalanced';
         }
-        // Until an accountant-approved rounding posting rule exists, do not create
-        // a native payment whose bank line would differ from the actual bank amount.
         if (!$existingIsPosted && abs((float) $summary['rounding_difference']) > 0.00001) {
             $preview['errors'][] = 'BankSyncPostingRoundingPolicyRequired';
         }
 
-        // Before posting, only confirmed matches are settlement inputs. After posting,
-        // the same rows have status=posted; include them so the audit preview remains
-        // useful and can reconstruct before/after balances without offering posting again.
+        // Once posted, include the posted matches so this same page remains a useful
+        // audit view instead of losing the original allocation rows.
         $settlements = array();
         foreach ($this->matchManager->getForTransaction((int) $transaction->rowid) as $match) {
             if ((string) $match->status === 'confirmed' || ($existingIsPosted && (string) $match->status === 'posted')) {
@@ -253,13 +247,7 @@ class BankSyncPostingService
         return $preview;
     }
 
-    /**
-     * Create the native Dolibarr posting after explicit user confirmation.
-     *
-     * @param object $transaction BankSync staging transaction
-     * @param User $user Current user
-     * @return array<string,int|string>
-     */
+    /** @return array<string,int|string> */
     public function post($transaction, $user)
     {
         $preview = $this->buildPreview($transaction);
@@ -267,10 +255,8 @@ class BankSyncPostingService
             throw new RuntimeException(!empty($preview['errors']) ? (string) $preview['errors'][0] : 'BankSyncPostingBlocked');
         }
 
-        // Dolibarr's DoliDB supports nested transaction depth. The native object
-        // methods below start/commit their own logical transaction levels; this
-        // outer level keeps native core writes and BankSync audit/status writes
-        // atomic as one database transaction.
+        // DoliDB tracks nested transaction depth. Native object methods use their
+        // own logical levels; this outer level keeps core and BankSync writes atomic.
         $this->db->begin('BankSync native posting');
         try {
             $postingId = $this->postingManager->acquire((int) $transaction->rowid, (string) $preview['kind'], (int) $user->id);
@@ -350,8 +336,8 @@ class BankSyncPostingService
         $payment->note_private = $this->auditNote($transaction);
         $payment->fk_account = (int) $preview['bank_account_id'];
 
-        // closepaidinvoices=1 makes fully settled invoices switch to paid while
-        // partial allocations remain open with their native remaining balance.
+        // Fully settled invoices are closed by the native create() method; partial
+        // allocations remain open with their native remaining balance.
         $paymentId = $payment->create($user, 1, $thirdparty);
         if ($paymentId <= 0) {
             throw new RuntimeException($payment->error ? $payment->error : 'BankSyncPostingPaymentCreateFailed');
