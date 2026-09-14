@@ -74,7 +74,7 @@ class BankSyncManualSearch
                 return $this->fetchInvoiceTarget($sql, BankSyncMatchManager::TARGET_SUPPLIER_INVOICE, '/fourn/facture/card.php?facid=', 'ref_supplier');
 
             case BankSyncMatchManager::TARGET_SALARY:
-                $sql = 'SELECT s.rowid, s.ref, s.datep AS target_date, s.amount, s.label, u.firstname, u.lastname,';
+                $sql = 'SELECT s.rowid, s.ref, s.datep AS payment_date, s.datesp AS period_start, s.dateep AS period_end, s.amount, s.label, u.firstname, u.lastname,';
                 $sql .= ' COALESCE((SELECT SUM(ps.amount) FROM '.$this->db->prefix().'payment_salary AS ps WHERE ps.fk_salary = s.rowid), 0) AS paid_amount';
                 $sql .= ' FROM '.$this->db->prefix().'salary AS s LEFT JOIN '.$this->db->prefix().'user AS u ON u.rowid = s.fk_user';
                 $sql .= ' WHERE s.entity = '.$this->entity.' AND s.rowid = '.$targetId.' LIMIT 1';
@@ -87,7 +87,9 @@ class BankSyncManualSearch
                 $name = trim((string) $obj->firstname.' '.(string) $obj->lastname);
                 return array('target_type' => BankSyncMatchManager::TARGET_SALARY, 'target_id' => (int) $obj->rowid,
                     'ref' => trim((string) $obj->ref) !== '' ? (string) $obj->ref : '#'.(int) $obj->rowid,
-                    'label' => $name.($obj->label ? ' — '.(string) $obj->label : ''), 'date' => (string) $obj->target_date,
+                    'label' => $name.($obj->label ? ' — '.(string) $obj->label : ''),
+                    'date' => $this->salaryPeriodLabel((string) $obj->period_start, (string) $obj->period_end, (string) $obj->payment_date),
+                    'period_start' => (string) $obj->period_start, 'period_end' => (string) $obj->period_end,
                     'remaining_amount' => $this->decimal($remaining), 'url' => '/salaries/card.php?id='.(int) $obj->rowid);
 
             case BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION:
@@ -174,12 +176,12 @@ class BankSyncManualSearch
 
     private function searchSalaries($transaction, $query, $limit)
     {
-        $sql = 'SELECT s.rowid, s.ref, s.datep AS target_date, s.amount, s.label, u.firstname, u.lastname,';
+        $sql = 'SELECT s.rowid, s.ref, s.datep AS payment_date, s.datesp AS period_start, s.dateep AS period_end, s.amount, s.label, u.firstname, u.lastname,';
         $sql .= ' COALESCE((SELECT SUM(ps.amount) FROM '.$this->db->prefix().'payment_salary AS ps WHERE ps.fk_salary = s.rowid), 0) AS paid_amount';
         $sql .= ' FROM '.$this->db->prefix().'salary AS s LEFT JOIN '.$this->db->prefix().'user AS u ON u.rowid = s.fk_user';
         $sql .= ' WHERE s.entity = '.$this->entity.' AND s.paye = 0';
         $sql .= $this->textFilter($query, array('s.ref', 's.label', 'u.firstname', 'u.lastname'));
-        $sql .= ' ORDER BY s.datep DESC'.$this->db->plimit(200, 0);
+        $sql .= ' ORDER BY COALESCE(s.dateep, s.datesp, s.datep) DESC, s.rowid DESC'.$this->db->plimit(200, 0);
         $resql = $this->db->query($sql);
         if (!$resql) return array();
         $rows = array(); $bankAmount = abs((float) $transaction->amount);
@@ -187,14 +189,23 @@ class BankSyncManualSearch
             $remaining = max(0, (float) $obj->amount - (float) $obj->paid_amount);
             if ($remaining <= 0.00001) continue;
             $name = trim((string) $obj->firstname.' '.(string) $obj->lastname);
+            $periodDate = trim((string) $obj->period_end) !== '' ? (string) $obj->period_end : (trim((string) $obj->period_start) !== '' ? (string) $obj->period_start : (string) $obj->payment_date);
             $rows[] = array('target_type' => BankSyncMatchManager::TARGET_SALARY, 'target_id' => (int) $obj->rowid,
                 'ref' => trim((string) $obj->ref) !== '' ? (string) $obj->ref : '#'.(int) $obj->rowid,
-                'label' => $name.($obj->label ? ' — '.(string) $obj->label : ''), 'date' => (string) $obj->target_date,
+                'label' => $name.($obj->label ? ' — '.(string) $obj->label : ''),
+                'date' => $this->salaryPeriodLabel((string) $obj->period_start, (string) $obj->period_end, (string) $obj->payment_date),
+                'period_start' => (string) $obj->period_start, 'period_end' => (string) $obj->period_end,
                 'remaining_amount' => $this->decimal($remaining), 'suggested_allocation' => $this->decimal(min($bankAmount, $remaining)),
-                'distance' => abs($remaining - $bankAmount), 'url' => '/salaries/card.php?id='.(int) $obj->rowid);
+                'distance' => abs($remaining - $bankAmount), 'date_distance' => $this->dayDistance((string) $transaction->booking_date, $periodDate),
+                'url' => '/salaries/card.php?id='.(int) $obj->rowid);
         }
         $this->db->free($resql);
-        usort($rows, function ($a, $b) { return $a['distance'] <=> $b['distance']; });
+        usort($rows, function ($a, $b) {
+            if ((float) $a['distance'] != (float) $b['distance']) return ((float) $a['distance'] < (float) $b['distance']) ? -1 : 1;
+            $da = $a['date_distance'] === null ? PHP_INT_MAX : (int) $a['date_distance'];
+            $db = $b['date_distance'] === null ? PHP_INT_MAX : (int) $b['date_distance'];
+            return $da <=> $db;
+        });
         return array_slice($rows, 0, $limit);
     }
 
@@ -222,6 +233,25 @@ class BankSyncManualSearch
         $this->db->free($resql);
         usort($rows, function ($a, $b) { return $a['distance'] <=> $b['distance']; });
         return array_slice($rows, 0, $limit);
+    }
+
+    private function salaryPeriodLabel($start, $end, $fallback = '')
+    {
+        $start = trim((string) $start);
+        $end = trim((string) $end);
+        if ($start !== '' && $end !== '') return $start.' – '.$end;
+        if ($start !== '') return $start;
+        if ($end !== '') return $end;
+        return trim((string) $fallback);
+    }
+
+    private function dayDistance($dateA, $dateB)
+    {
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}/', (string) $dateA) || !preg_match('/^\d{4}-\d{2}-\d{2}/', (string) $dateB)) return null;
+        $a = strtotime(substr((string) $dateA, 0, 10));
+        $b = strtotime(substr((string) $dateB, 0, 10));
+        if ($a === false || $b === false) return null;
+        return (int) floor(abs($a - $b) / 86400);
     }
 
     private function textFilter($query, array $fields)
