@@ -62,6 +62,16 @@ function banksyncListUrl($page, array $filters)
     return dol_buildpath('/banksync/transactions.php', 1).'?'.http_build_query($params);
 }
 
+function banksyncEncodeReturnState($page, $row, array $filters)
+{
+    $payload = json_encode(array(
+        'page' => max(0, (int) $page),
+        'row' => max(0, (int) $row),
+        'filters' => banksyncNormalizeReturnFilters($filters),
+    ));
+    return rtrim(strtr(base64_encode($payload), '+/', '-_'), '=');
+}
+
 function banksyncListConfidencePresentation($langs, $confidence)
 {
     $confidence = (int) $confidence;
@@ -71,8 +81,11 @@ function banksyncListConfidencePresentation($langs, $confidence)
     return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncConfidenceWeak'));
 }
 
-function banksyncTransactionStatusPresentation($langs, $status)
+function banksyncTransactionStatusPresentation($langs, $status, $eventType = '')
 {
+    if ((string) $eventType === 'bank_fee' && (string) $status === 'new') {
+        return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncPostingReady'));
+    }
     switch ((string) $status) {
         case 'matched': return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncTransactionStatus_matched'));
         case 'partially_matched': return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncTransactionStatus_partially_matched'));
@@ -124,8 +137,7 @@ function banksyncCompactPagination($langs, $page, $totalPages, $totalRows, array
     return $html;
 }
 
-// Reconciliation pages return to transactions.php without list-state parameters.
-// A short-lived one-shot cookie restores page, active filters and row anchor.
+// Backward-compatible fallback for older reconciliation links: restore list state from the short-lived cookie.
 if (!isset($_GET['page']) && !isset($_POST['page']) && !empty($_COOKIE['banksync_return'])) {
     $encoded = strtr((string) $_COOKIE['banksync_return'], '-_', '+/');
     $padding = strlen($encoded) % 4;
@@ -177,7 +189,14 @@ if (!empty($filters['filter_event_type'])) $where[] = "t.bank_event_type = '".$d
 if (!empty($filters['filter_code'])) $where[] = "t.transaction_code LIKE '%".$db->escape($filters['filter_code'])."%'";
 if (!empty($filters['filter_counterparty'])) $where[] = "t.counterparty_name LIKE '%".$db->escape($filters['filter_counterparty'])."%'";
 if (!empty($filters['filter_reference'])) $where[] = "t.reference LIKE '%".$db->escape($filters['filter_reference'])."%'";
-if (!empty($filters['filter_status'])) $where[] = "t.status = '".$db->escape($filters['filter_status'])."'";
+if (!empty($filters['filter_status'])) {
+    if ($filters['filter_status'] === 'new') {
+        // Bank fees need no business-object reconciliation; do not pollute the "new/to reconcile" work queue.
+        $where[] = "t.status = 'new' AND COALESCE(t.bank_event_type, '') <> 'bank_fee'";
+    } else {
+        $where[] = "t.status = '".$db->escape($filters['filter_status'])."'";
+    }
+}
 $whereSql = implode(' AND ', $where);
 
 $totalRows = 0;
@@ -272,12 +291,11 @@ if ($resql) {
         if (!empty($obj->source_account_number)) print '<br><span class="opacitymedium small">'.dol_escape_htmltag($obj->source_account_number).'</span>';
         print '</td><td class="right nowrap">'.price($obj->amount).' '.dol_escape_htmltag($obj->currency).'</td><td>';
 
-        $reconcileUrl = dol_buildpath('/banksync/reconcile.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.(int) $obj->rowid;
-        $returnStatePayload = json_encode(array('page' => $page, 'row' => (int) $obj->rowid, 'filters' => $filters));
-        $returnState = rtrim(strtr(base64_encode($returnStatePayload), '+/', '-_'), '=');
+        $returnState = banksyncEncodeReturnState($page, (int) $obj->rowid, $filters);
+        $reconcileUrl = dol_buildpath('/banksync/reconcile.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.(int) $obj->rowid.'&return_state='.rawurlencode($returnState);
         $rememberReturn = "document.cookie='banksync_return=".$returnState."; path=/; max-age=1800; SameSite=Lax';";
         if ($eventType === 'bank_fee') {
-            print '<span class="badge badge-status4">'.$langs->trans('BankSyncTarget_bank_fee').'</span><br><a class="small" onclick="'.dol_escape_htmltag($rememberReturn).'" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncReview').'</a>';
+            print '<span class="badge badge-status4">'.$langs->trans('BankSyncTarget_bank_fee').'</span><br><a class="small" onclick="'.dol_escape_htmltag($rememberReturn).'" href="'.dol_escape_htmltag($reconcileUrl).'">'.$langs->trans('BankSyncReview').'</a>';
         } elseif (!empty($obj->match_id)) {
             $targetKey = 'BankSyncTarget_'.(string) $obj->match_target_type;
             $targetLabel = $langs->trans($targetKey);
@@ -295,12 +313,12 @@ if ($resql) {
                 print '<span class="badge '.dol_escape_htmltag($cp['class']).'">'.dol_escape_htmltag($targetLabel).' — '.$confidence.'%</span>';
                 print '<br><span class="small opacitymedium">'.dol_escape_htmltag($cp['label']).'</span>';
             }
-            print '<br><a class="small" onclick="'.dol_escape_htmltag($rememberReturn).'" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncReview').'</a>';
+            print '<br><a class="small" onclick="'.dol_escape_htmltag($rememberReturn).'" href="'.dol_escape_htmltag($reconcileUrl).'">'.$langs->trans('BankSyncReview').'</a>';
         } else {
-            print '<a onclick="'.dol_escape_htmltag($rememberReturn).'" href="'.$reconcileUrl.'">'.$langs->trans('BankSyncFindCandidates').'</a>';
+            print '<a onclick="'.dol_escape_htmltag($rememberReturn).'" href="'.dol_escape_htmltag($reconcileUrl).'">'.$langs->trans('BankSyncFindCandidates').'</a>';
         }
         print '</td><td>';
-        $sp = banksyncTransactionStatusPresentation($langs, (string) $obj->status);
+        $sp = banksyncTransactionStatusPresentation($langs, (string) $obj->status, $eventType);
         print '<span class="badge '.dol_escape_htmltag($sp['class']).'">'.dol_escape_htmltag($sp['label']).'</span>';
         print '</td></tr>';
     }
