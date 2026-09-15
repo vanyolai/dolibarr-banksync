@@ -81,11 +81,8 @@ function banksyncListConfidencePresentation($langs, $confidence)
     return array('class' => 'badge-status0', 'label' => $langs->trans('BankSyncConfidenceWeak'));
 }
 
-function banksyncTransactionStatusPresentation($langs, $status, $eventType = '')
+function banksyncTransactionStatusPresentation($langs, $status)
 {
-    if ((string) $eventType === 'bank_fee' && (string) $status === 'new') {
-        return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncPostingReady'));
-    }
     switch ((string) $status) {
         case 'matched': return array('class' => 'badge-status4', 'label' => $langs->trans('BankSyncTransactionStatus_matched'));
         case 'partially_matched': return array('class' => 'badge-status1', 'label' => $langs->trans('BankSyncTransactionStatus_partially_matched'));
@@ -189,14 +186,7 @@ if (!empty($filters['filter_event_type'])) $where[] = "t.bank_event_type = '".$d
 if (!empty($filters['filter_code'])) $where[] = "t.transaction_code LIKE '%".$db->escape($filters['filter_code'])."%'";
 if (!empty($filters['filter_counterparty'])) $where[] = "t.counterparty_name LIKE '%".$db->escape($filters['filter_counterparty'])."%'";
 if (!empty($filters['filter_reference'])) $where[] = "t.reference LIKE '%".$db->escape($filters['filter_reference'])."%'";
-if (!empty($filters['filter_status'])) {
-    if ($filters['filter_status'] === 'new') {
-        // Bank fees need no business-object reconciliation; do not pollute the "new/to reconcile" work queue.
-        $where[] = "t.status = 'new' AND COALESCE(t.bank_event_type, '') <> 'bank_fee'";
-    } else {
-        $where[] = "t.status = '".$db->escape($filters['filter_status'])."'";
-    }
-}
+if (!empty($filters['filter_status'])) $where[] = "t.status = '".$db->escape($filters['filter_status'])."'";
 $whereSql = implode(' AND ', $where);
 
 $totalRows = 0;
@@ -318,7 +308,7 @@ if ($resql) {
             print '<a onclick="'.dol_escape_htmltag($rememberReturn).'" href="'.dol_escape_htmltag($reconcileUrl).'">'.$langs->trans('BankSyncFindCandidates').'</a>';
         }
         print '</td><td>';
-        $sp = banksyncTransactionStatusPresentation($langs, (string) $obj->status, $eventType);
+        $sp = banksyncTransactionStatusPresentation($langs, (string) $obj->status);
         print '<span class="badge '.dol_escape_htmltag($sp['class']).'">'.dol_escape_htmltag($sp['label']).'</span>';
         print '</td></tr>';
     }
