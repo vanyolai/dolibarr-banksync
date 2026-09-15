@@ -10,7 +10,7 @@
  */
 class BankSyncSchema
 {
-    const VERSION = '0.4.1';
+    const VERSION = '0.4.2';
 
     /**
      * @param DoliDB $db Database handler
@@ -100,6 +100,12 @@ class BankSyncSchema
             'KEY idx_banksync_posting_native (native_object_type, native_object_id)');
         self::ensureIndex($db, $prefix.'banksync_posting', 'idx_banksync_posting_bank',
             'KEY idx_banksync_posting_bank (fk_bank)');
+
+        // A bank fee is already fully reconciled once it has been classified as such:
+        // it has no invoice/salary/tax business object to allocate against. Posting remains
+        // a separate explicit workflow, but reconciliation must not leave it in the "new" queue.
+        self::query($db, "UPDATE {$prefix}banksync_transaction SET status = 'matched'"
+            ." WHERE bank_event_type = 'bank_fee' AND status = 'new'");
     }
 
     private static function ensureColumn($db, $table, $column, $definition)
