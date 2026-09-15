@@ -60,11 +60,14 @@ Notes:
 
 - One bank transaction may reconcile to multiple Dolibarr business objects.
 - Reconciliation is therefore N:N and stores an `allocated_amount` per target.
-- Transaction-level reconciliation states are allocation based:
-  - `new`: no confirmed allocation
-  - `partially_matched`: one or more confirmed allocations, but the total does not balance the bank transaction
-  - `matched`: confirmed allocations balance the bank transaction within reconciliation tolerance
+- Transaction-level reconciliation states are:
+  - `new`: reconciliation work is still required
+  - `partially_matched`: one or more confirmed allocations exist, but the transaction is not fully reconciled
+  - `matched`: no further reconciliation work is required
   - `posted`: native Dolibarr posting has been created
+- For invoice/salary/tax-like business objects, `matched` normally means confirmed allocations balance the bank transaction within reconciliation tolerance.
+- A classified standalone bank fee has no business object to allocate against, so it becomes `matched` immediately after classification. It must not stay in the `new` reconciliation queue.
+- **Ready for posting is not a transaction status.** It is only a posting-preview result indicating that the already reconciled transaction currently satisfies the native posting preconditions.
 - A candidate may be confirmed with a manually adjusted allocation amount.
 - Multiple invoices can be confirmed progressively until the full bank amount is allocated.
 - Credit notes will later be represented as signed settlement components rather than being forced into a fake negative bank payment.
@@ -110,5 +113,5 @@ Notes:
 - Batch candidate scanning must preserve the current transaction-list page and active filters.
 - Transaction lists should provide numbered pagination rather than only previous/next navigation.
 - Transaction-list filtering should cover at least booking-date range, bank-event type, transaction code, counterparty, bank reference and reconciliation status.
-- Posting preview is available only when a transaction is fully reconciled (`matched`) or when the transaction is a standalone bank fee that requires no business-object reconciliation.
+- Posting preview is available for reconciled (`matched`) transactions and remains a separate step from reconciliation state.
 - After posting, the preview remains an audit view and links to the created native Dolibarr object; the posting action is no longer offered.
