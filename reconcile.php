@@ -26,9 +26,51 @@ try {
     setEventMessages($langs->trans('BankSyncSchemaMigrationFailed', $e->getMessage()), null, 'errors');
 }
 
+function banksyncReconcileUrl($transactionId, $returnState = '')
+{
+    $params = array(
+        'mainmenu' => 'bank',
+        'leftmenu' => 'banksync_transactions',
+        'id' => (int) $transactionId,
+    );
+    if (trim((string) $returnState) !== '') $params['return_state'] = (string) $returnState;
+    return dol_buildpath('/banksync/reconcile.php', 1).'?'.http_build_query($params);
+}
+
+function banksyncReturnToListUrl($returnState)
+{
+    $fallback = dol_buildpath('/banksync/transactions.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions';
+    $returnState = trim((string) $returnState);
+    if ($returnState === '') return $fallback;
+
+    $encoded = strtr($returnState, '-_', '+/');
+    $padding = strlen($encoded) % 4;
+    if ($padding) $encoded .= str_repeat('=', 4 - $padding);
+    $decoded = base64_decode($encoded, true);
+    $state = $decoded !== false ? json_decode($decoded, true) : null;
+    if (!is_array($state)) return $fallback;
+
+    $params = array('mainmenu' => 'bank', 'leftmenu' => 'banksync_transactions');
+    if (!empty($state['page'])) $params['page'] = max(0, (int) $state['page']);
+    $allowedFilters = array('filter_date_from', 'filter_date_to', 'filter_event_type', 'filter_code', 'filter_counterparty', 'filter_reference', 'filter_status');
+    if (!empty($state['filters']) && is_array($state['filters'])) {
+        foreach ($allowedFilters as $key) {
+            if (!isset($state['filters'][$key])) continue;
+            $value = trim((string) $state['filters'][$key]);
+            if ($value !== '') $params[$key] = substr($value, 0, 120);
+        }
+    }
+
+    $url = dol_buildpath('/banksync/transactions.php', 1).'?'.http_build_query($params);
+    $row = isset($state['row']) ? max(0, (int) $state['row']) : 0;
+    if ($row > 0) $url .= '#banksync-tx-'.$row;
+    return $url;
+}
+
 $entity = (int) $conf->entity;
 $transactionId = GETPOSTINT('id');
 $action = GETPOST('action', 'aZ09');
+$returnState = GETPOST('return_state', 'alphanohtml');
 if ($transactionId <= 0) accessforbidden('Missing transaction id.');
 
 $matchManager = new BankSyncMatchManager($db, $entity);
@@ -54,19 +96,19 @@ try {
     if ($action === 'confirm') {
         $matchManager->setStatus(GETPOSTINT('match_id'), 'confirmed', $user->id, $transactionId, GETPOST('allocated_amount', 'alphanohtml'));
         setEventMessages($langs->trans('BankSyncMatchConfirmed'), null, 'mesgs');
-        header('Location: '.dol_buildpath('/banksync/reconcile.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.$transactionId);
+        header('Location: '.banksyncReconcileUrl($transactionId, $returnState));
         exit;
     }
     if ($action === 'reject') {
         $matchManager->setStatus(GETPOSTINT('match_id'), 'rejected', $user->id, $transactionId);
         setEventMessages($langs->trans('BankSyncMatchRejected'), null, 'mesgs');
-        header('Location: '.dol_buildpath('/banksync/reconcile.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.$transactionId);
+        header('Location: '.banksyncReconcileUrl($transactionId, $returnState));
         exit;
     }
     if ($action === 'refresh') {
         $matcher->refreshSuggestions($transactionId, $user->id);
         setEventMessages($langs->trans('BankSyncCandidatesRefreshed'), null, 'mesgs');
-        header('Location: '.dol_buildpath('/banksync/reconcile.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.$transactionId);
+        header('Location: '.banksyncReconcileUrl($transactionId, $returnState));
         exit;
     }
     if ($action === 'manual_confirm') {
@@ -75,7 +117,7 @@ try {
         $allocatedAmount = GETPOST('allocated_amount', 'alphanohtml');
         $matchManager->upsert($transactionId, $targetType, $targetId, $allocatedAmount, 0, 'manual', 'confirmed', $user->id);
         setEventMessages($langs->trans('BankSyncManualMatchConfirmed'), null, 'mesgs');
-        header('Location: '.dol_buildpath('/banksync/reconcile.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.$transactionId);
+        header('Location: '.banksyncReconcileUrl($transactionId, $returnState));
         exit;
     }
 } catch (Exception $e) {
@@ -144,16 +186,20 @@ function banksyncConfidencePresentation($langs, $confidence)
 llxHeader('', $langs->trans('BankSyncReconciliation'));
 print load_fiche_titre($langs->trans('BankSyncReconciliation').' #'.$transactionId, '', 'bank');
 
+$backToListUrl = banksyncReturnToListUrl($returnState);
 print '<div class="tabsAction">';
-print '<a class="butAction" href="'.dol_buildpath('/banksync/transactions.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions">'.$langs->trans('BackToList').'</a>';
+print '<a class="butAction" href="'.dol_escape_htmltag($backToListUrl).'">'.$langs->trans('BackToList').'</a>';
 $canPreviewPosting = ((string) $transaction->bank_event_type === 'bank_fee' || in_array((string) $transaction->status, array('matched', 'posted'), true));
 if ($canPreviewPosting) {
-    print '<a class="butAction" href="'.dol_buildpath('/banksync/posting.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.$transactionId.'">'.$langs->trans('BankSyncOpenPostingPreview').'</a>';
+    $postingUrl = dol_buildpath('/banksync/posting.php', 1).'?mainmenu=bank&leftmenu=banksync_transactions&id='.$transactionId;
+    if ($returnState !== '') $postingUrl .= '&return_state='.rawurlencode($returnState);
+    print '<a class="butAction" href="'.dol_escape_htmltag($postingUrl).'">'.$langs->trans('BankSyncOpenPostingPreview').'</a>';
 }
 if ($user->hasRight('banksync', 'import') && (string) $transaction->bank_event_type !== 'bank_fee') {
     print '<form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'" class="inline-block">';
     print '<input type="hidden" name="token" value="'.newToken().'">';
     print '<input type="hidden" name="id" value="'.$transactionId.'"><input type="hidden" name="action" value="refresh">';
+    if ($returnState !== '') print '<input type="hidden" name="return_state" value="'.dol_escape_htmltag($returnState).'">';
     print '<button type="submit" class="butAction">'.$langs->trans('BankSyncRefreshCandidates').'</button></form>';
 }
 print '</div>';
@@ -168,7 +214,10 @@ print '</td></tr>';
 print '<tr><td>'.$langs->trans('BankSyncReference').'</td><td>'.dol_escape_htmltag((string) $transaction->reference).'</td></tr>';
 print '<tr><td>'.$langs->trans('Amount').'</td><td><strong>'.price($transaction->amount).' '.dol_escape_htmltag((string) $transaction->currency).'</strong></td></tr>';
 print '<tr><td>'.$langs->trans('BankSyncDolibarrBankAccount').'</td><td>'.(!empty($transaction->fk_bank_account) ? dol_escape_htmltag(trim((string) $transaction->bank_account_label) !== '' ? (string) $transaction->bank_account_label : (string) $transaction->bank_account_ref) : '<span class="error">'.$langs->trans('BankSyncUnmapped').'</span>').'</td></tr>';
-print '<tr><td>'.$langs->trans('Status').'</td><td>'.dol_escape_htmltag((string) $transaction->status).'</td></tr>';
+$statusLabelKey = ((string) $transaction->bank_event_type === 'bank_fee' && (string) $transaction->status === 'new') ? 'BankSyncPostingReady' : 'BankSyncTransactionStatus_'.(string) $transaction->status;
+$statusLabel = $langs->trans($statusLabelKey);
+if ($statusLabel === $statusLabelKey) $statusLabel = (string) $transaction->status;
+print '<tr><td>'.$langs->trans('Status').'</td><td>'.dol_escape_htmltag($statusLabel).'</td></tr>';
 print '</table>';
 
 if (!empty($allocationSummary) && (string) $transaction->bank_event_type !== 'bank_fee') {
@@ -220,12 +269,14 @@ if ((string) $transaction->bank_event_type === 'bank_fee') {
             if ($status !== 'confirmed' && $status !== 'posted') {
                 print '<form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'" class="inline-block">';
                 print '<input type="hidden" name="token" value="'.newToken().'"><input type="hidden" name="id" value="'.$transactionId.'"><input type="hidden" name="match_id" value="'.(int) $candidate['match_id'].'"><input type="hidden" name="action" value="confirm">';
-                print '<input class="width75 right" type="text" name="allocated_amount" value="'.dol_escape_htmltag((string) $candidate['allocated_amount']).'"> ';
+                if ($returnState !== '') print '<input type="hidden" name="return_state" value="'.dol_escape_htmltag($returnState).'">';
+                print '<input class="right" style="width:110px" type="text" name="allocated_amount" value="'.dol_escape_htmltag((string) $candidate['allocated_amount']).'"> ';
                 print '<button type="submit" class="button button-save">'.$langs->trans('BankSyncConfirmMatch').'</button></form> ';
             }
             if ($status !== 'rejected' && $status !== 'posted') {
                 print '<form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'" class="inline-block">';
                 print '<input type="hidden" name="token" value="'.newToken().'"><input type="hidden" name="id" value="'.$transactionId.'"><input type="hidden" name="match_id" value="'.(int) $candidate['match_id'].'"><input type="hidden" name="action" value="reject">';
+                if ($returnState !== '') print '<input type="hidden" name="return_state" value="'.dol_escape_htmltag($returnState).'">';
                 print '<button type="submit" class="button">'.$langs->trans('BankSyncRejectMatch').'</button></form>';
             }
         }
@@ -239,6 +290,7 @@ if ((string) $transaction->bank_event_type !== 'bank_fee') {
     print '<div class="opacitymedium">'.$langs->trans('BankSyncManualReconciliationHelp').'</div><br>';
     print '<form method="GET" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'">';
     print '<input type="hidden" name="mainmenu" value="bank"><input type="hidden" name="leftmenu" value="banksync_transactions"><input type="hidden" name="id" value="'.$transactionId.'"><input type="hidden" name="manual_search" value="1">';
+    if ($returnState !== '') print '<input type="hidden" name="return_state" value="'.dol_escape_htmltag($returnState).'">';
     print '<select name="manual_type" class="flat">';
     $types = array(BankSyncMatchManager::TARGET_CUSTOMER_INVOICE, BankSyncMatchManager::TARGET_SUPPLIER_INVOICE, BankSyncMatchManager::TARGET_SALARY, BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION);
     foreach ($types as $type) print '<option value="'.dol_escape_htmltag($type).'"'.($manualType === $type ? ' selected' : '').'>'.dol_escape_htmltag(banksyncTargetLabel($langs, $type)).'</option>';
@@ -258,7 +310,8 @@ if ((string) $transaction->bank_event_type !== 'bank_fee') {
                 print '<tr class="oddeven"><td><a href="'.dol_buildpath((string) $result['url'], 1).'">'.dol_escape_htmltag((string) $result['ref']).'</a></td><td>'.dol_escape_htmltag((string) $result['label']).'</td><td>'.dol_escape_htmltag((string) $result['date']).'</td><td class="right nowrap">'.price($result['remaining_amount']).' '.dol_escape_htmltag((string) $transaction->currency).'</td>';
                 print '<td class="right nowrap"><form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'" class="inline-block">';
                 print '<input type="hidden" name="token" value="'.newToken().'"><input type="hidden" name="id" value="'.$transactionId.'"><input type="hidden" name="action" value="manual_confirm"><input type="hidden" name="target_type" value="'.dol_escape_htmltag((string) $result['target_type']).'"><input type="hidden" name="target_id" value="'.(int) $result['target_id'].'">';
-                print '<input class="width100 right" type="text" name="allocated_amount" value="'.dol_escape_htmltag(number_format($defaultAllocation, 2, '.', '')).'"> '.dol_escape_htmltag((string) $transaction->currency).' ';
+                if ($returnState !== '') print '<input type="hidden" name="return_state" value="'.dol_escape_htmltag($returnState).'">';
+                print '<input class="right" style="width:110px" type="text" name="allocated_amount" value="'.dol_escape_htmltag(number_format($defaultAllocation, 2, '.', '')).'"> '.dol_escape_htmltag((string) $transaction->currency).' ';
                 print '<button type="submit" class="button button-save">'.$langs->trans('BankSyncManualAssign').'</button></form></td></tr>';
             }
         }
