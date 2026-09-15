@@ -6,8 +6,9 @@ require_once __DIR__.'/banksyncmatchmanager.class.php';
 /**
  * Finds Dolibarr business objects that may explain a staged bank transaction.
  *
- * Matching is deliberately advisory: this class never creates native Dolibarr payments.
- * It scores candidates and stores them as suggested BankSync matches for human review.
+ * Matching is normally advisory: this class never creates native Dolibarr payments.
+ * A deliberately narrow class of unambiguous invoice matches may be auto-confirmed,
+ * but native Dolibarr posting always remains a separate explicit workflow.
  */
 class BankSyncCandidateMatcher
 {
@@ -47,6 +48,16 @@ class BankSyncCandidateMatcher
 
         if ((string) $transaction->bank_event_type === 'bank_fee') {
             return array();
+        }
+
+        $preservedDecisions = array();
+        $hasConfirmedOrPosted = false;
+        foreach ($this->matchManager->getForTransaction($transactionId) as $existingMatch) {
+            $key = (string) $existingMatch->target_type.':'.(int) $existingMatch->target_id;
+            $preservedDecisions[$key] = (string) $existingMatch->status;
+            if (in_array((string) $existingMatch->status, array('confirmed', 'posted'), true)) {
+                $hasConfirmedOrPosted = true;
+            }
         }
 
         $candidates = array();
@@ -114,6 +125,41 @@ class BankSyncCandidateMatcher
             );
         }
 
+        // Auto-confirm only a single, unambiguous invoice candidate with exact amount,
+        // a full invoice reference hit and a strong identity signal. Never override a
+        // preserved human rejection, and never add another automatic allocation when
+        // a transaction already has a confirmed/posted allocation.
+        if (!$hasConfirmedOrPosted) {
+            $autoConfirmCandidate = null;
+            foreach ($deduped as $candidate) {
+                $key = (string) $candidate['target_type'].':'.(int) $candidate['target_id'];
+                if (isset($preservedDecisions[$key]) && $preservedDecisions[$key] === 'rejected') {
+                    continue;
+                }
+                if (!$this->isAutoConfirmableInvoiceCandidate($candidate)) {
+                    continue;
+                }
+                if ($autoConfirmCandidate !== null) {
+                    $autoConfirmCandidate = false;
+                    break;
+                }
+                $autoConfirmCandidate = $candidate;
+            }
+
+            if (is_array($autoConfirmCandidate)) {
+                $this->matchManager->upsert(
+                    (int) $transactionId,
+                    (string) $autoConfirmCandidate['target_type'],
+                    (int) $autoConfirmCandidate['target_id'],
+                    (string) $autoConfirmCandidate['allocated_amount'],
+                    (int) $autoConfirmCandidate['confidence'],
+                    'auto-confirm:exact-amount+reference+identity',
+                    'confirmed',
+                    (int) $userId
+                );
+            }
+        }
+
         $statuses = array();
         foreach ($this->matchManager->getForTransaction($transactionId) as $match) {
             $key = (string) $match->target_type.':'.(int) $match->target_id;
@@ -138,6 +184,24 @@ class BankSyncCandidateMatcher
         unset($candidate);
 
         return $deduped;
+    }
+
+    private function isAutoConfirmableInvoiceCandidate(array $candidate)
+    {
+        if (!in_array((string) $candidate['target_type'], array(
+            BankSyncMatchManager::TARGET_CUSTOMER_INVOICE,
+            BankSyncMatchManager::TARGET_SUPPLIER_INVOICE,
+        ), true)) {
+            return false;
+        }
+        if ((int) $candidate['confidence'] < 100) {
+            return false;
+        }
+        $codes = isset($candidate['reason_codes']) && is_array($candidate['reason_codes']) ? $candidate['reason_codes'] : array();
+        if (!in_array('amount', $codes, true) || !in_array('reference', $codes, true)) {
+            return false;
+        }
+        return in_array('partner', $codes, true) || in_array('account', $codes, true);
     }
 
     /**
