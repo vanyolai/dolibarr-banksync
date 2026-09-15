@@ -159,7 +159,7 @@ class BankSyncImporter
     {
         $sql = 'SELECT rowid, provider, account_number, external_transaction_id, external_entry_id,';
         $sql .= ' value_date, booking_date, direction, amount, currency, transaction_type, transaction_code,';
-        $sql .= ' counterparty_name, counterparty_account, reference';
+        $sql .= ' counterparty_name, counterparty_account, reference, status';
         $sql .= ' FROM '.$this->db->prefix().'banksync_transaction';
         $sql .= ' WHERE fk_import = '.((int) $importId).' AND entity = '.$this->entity;
         $sql .= " AND ((bank_event_type IS NULL OR bank_event_type = '')";
@@ -200,6 +200,9 @@ class BankSyncImporter
                 : ', dolibarr_payment_code = NULL';
             $sql .= ', classification_confidence = '.((int) $transaction->classificationConfidence);
             $sql .= ", classification_method = '".$this->db->escape($transaction->classificationMethod)."'";
+            if ($transaction->bankEventType === 'bank_fee' && (string) $obj->status === 'new') {
+                $sql .= ", status = 'matched'";
+            }
             $sql .= ' WHERE rowid = '.((int) $obj->rowid).' AND entity = '.$this->entity;
             if (!$this->db->query($sql)) {
                 throw new RuntimeException($this->db->lasterror());
@@ -265,6 +268,7 @@ class BankSyncImporter
         if ($rawJson === false) {
             $rawJson = '{}';
         }
+        $initialStatus = ($transaction->bankEventType === 'bank_fee') ? 'matched' : 'new';
 
         $sql = 'INSERT INTO '.$this->db->prefix().'banksync_transaction (';
         $sql .= 'entity, fk_import, fk_banksync_account, provider, account_number, external_transaction_id, external_entry_id, value_date, booking_date, direction, amount, currency, transaction_type, transaction_code, counterparty_name, counterparty_account, reference, bank_event_type, dolibarr_payment_code, classification_confidence, classification_method, source_line, raw_data, status, date_creation';
@@ -292,7 +296,7 @@ class BankSyncImporter
         $sql .= ", '".$this->db->escape($transaction->classificationMethod)."'";
         $sql .= ', '.((int) $transaction->sourceLine);
         $sql .= ", '".$this->db->escape($rawJson)."'";
-        $sql .= ", 'new'";
+        $sql .= ", '".$this->db->escape($initialStatus)."'";
         $sql .= ", '".$this->db->idate(dol_now())."'";
         $sql .= ')';
 
