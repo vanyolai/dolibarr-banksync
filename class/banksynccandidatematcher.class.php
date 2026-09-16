@@ -2,13 +2,15 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 
 require_once __DIR__.'/banksyncmatchmanager.class.php';
+require_once __DIR__.'/banksynctaxaccountmanager.class.php';
 
 /**
  * Finds Dolibarr business objects that may explain a staged bank transaction.
  *
  * Matching is normally advisory: this class never creates native Dolibarr payments.
- * A deliberately narrow class of unambiguous invoice matches may be auto-confirmed,
- * but native Dolibarr posting always remains a separate explicit workflow.
+ * A deliberately narrow class of unambiguous invoice matches and configured tax
+ * destination-account groups may be auto-confirmed, while native Dolibarr posting
+ * always remains a separate explicit workflow.
  */
 class BankSyncCandidateMatcher
 {
@@ -18,6 +20,8 @@ class BankSyncCandidateMatcher
     private $entity;
     /** @var BankSyncMatchManager */
     private $matchManager;
+    /** @var BankSyncTaxAccountManager */
+    private $taxAccountManager;
     /** @var array<int,array<int,string>> */
     private $partnerAccounts = array();
 
@@ -26,6 +30,7 @@ class BankSyncCandidateMatcher
         $this->db = $db;
         $this->entity = (int) $entity;
         $this->matchManager = new BankSyncMatchManager($db, $this->entity);
+        $this->taxAccountManager = new BankSyncTaxAccountManager($db, $this->entity);
     }
 
     /**
@@ -34,7 +39,7 @@ class BankSyncCandidateMatcher
      *
      * @param int $transactionId BankSync transaction rowid
      * @param int $userId User doing the refresh
-     * @param int $limit Maximum number of candidates to persist/return
+     * @param int $limit Maximum number of ordinary candidates to persist/return
      * @return array<int,array<string,mixed>>
      */
     public function refreshSuggestions($transactionId, $userId, $limit = 8)
@@ -65,17 +70,29 @@ class BankSyncCandidateMatcher
         $isDebit = !$isCredit;
         $eventType = (string) $transaction->bank_event_type;
 
-        if ($isCredit && in_array($eventType, array('transfer', 'refund', 'other'), true)) {
-            $candidates = array_merge($candidates, $this->findCustomerInvoices($transaction));
-        }
-
-        if ($isDebit && in_array($eventType, array('transfer', 'card', 'direct_debit', 'other'), true)) {
-            $candidates = array_merge($candidates, $this->findSupplierInvoices($transaction));
-        }
-
+        // An explicitly configured tax destination account is a stronger domain signal
+        // than partner-name heuristics. When it matches, only social/fiscal contribution
+        // objects of the configured type are considered for this bank transaction.
+        $taxMapping = null;
         if ($isDebit && in_array($eventType, array('transfer', 'other'), true)) {
-            $candidates = array_merge($candidates, $this->findSalaries($transaction));
-            $candidates = array_merge($candidates, $this->findSocialContributions($transaction));
+            $taxMapping = $this->taxAccountManager->findByAccount((string) $transaction->counterparty_account);
+        }
+
+        if ($taxMapping) {
+            $candidates = $this->findSocialContributions($transaction, $taxMapping);
+        } else {
+            if ($isCredit && in_array($eventType, array('transfer', 'refund', 'other'), true)) {
+                $candidates = array_merge($candidates, $this->findCustomerInvoices($transaction));
+            }
+
+            if ($isDebit && in_array($eventType, array('transfer', 'card', 'direct_debit', 'other'), true)) {
+                $candidates = array_merge($candidates, $this->findSupplierInvoices($transaction));
+            }
+
+            if ($isDebit && in_array($eventType, array('transfer', 'other'), true)) {
+                $candidates = array_merge($candidates, $this->findSalaries($transaction));
+                $candidates = array_merge($candidates, $this->findSocialContributions($transaction));
+            }
         }
 
         usort($candidates, function ($a, $b) {
@@ -95,21 +112,28 @@ class BankSyncCandidateMatcher
             return strcmp((string) $a['target_type'].':'.(string) $a['target_id'], (string) $b['target_type'].':'.(string) $b['target_id']);
         });
 
+        // Never truncate an exact mapped tax group: all component charges are needed
+        // for the allocation to balance and for the group to be auto-confirmable.
+        $autoGroupSizes = array();
+        foreach ($candidates as $candidate) {
+            if (!empty($candidate['auto_confirm_group']) && !empty($candidate['group_key'])) {
+                $gk = (string) $candidate['group_key'];
+                if (!isset($autoGroupSizes[$gk])) $autoGroupSizes[$gk] = 0;
+                $autoGroupSizes[$gk]++;
+            }
+        }
+        $effectiveLimit = max(1, (int) $limit);
+        if (!empty($autoGroupSizes)) $effectiveLimit = max($effectiveLimit, max($autoGroupSizes));
+
         $deduped = array();
         $seen = array();
         foreach ($candidates as $candidate) {
-            if ((int) $candidate['confidence'] < 45) {
-                continue;
-            }
+            if ((int) $candidate['confidence'] < 45) continue;
             $key = (string) $candidate['target_type'].':'.(int) $candidate['target_id'];
-            if (isset($seen[$key])) {
-                continue;
-            }
+            if (isset($seen[$key])) continue;
             $seen[$key] = true;
             $deduped[] = $candidate;
-            if (count($deduped) >= max(1, (int) $limit)) {
-                break;
-            }
+            if (count($deduped) >= $effectiveLimit) break;
         }
 
         foreach ($deduped as $candidate) {
@@ -125,27 +149,20 @@ class BankSyncCandidateMatcher
             );
         }
 
-        // Auto-confirm only a single, unambiguous invoice candidate with exact amount,
-        // a full invoice reference hit and a strong identity signal. Never override a
-        // preserved human rejection, and never add another automatic allocation when
-        // a transaction already has a confirmed/posted allocation.
         if (!$hasConfirmedOrPosted) {
+            // Auto-confirm one unambiguous invoice candidate with exact amount, full
+            // reference and strong identity signal.
             $autoConfirmCandidate = null;
             foreach ($deduped as $candidate) {
                 $key = (string) $candidate['target_type'].':'.(int) $candidate['target_id'];
-                if (isset($preservedDecisions[$key]) && $preservedDecisions[$key] === 'rejected') {
-                    continue;
-                }
-                if (!$this->isAutoConfirmableInvoiceCandidate($candidate)) {
-                    continue;
-                }
+                if (isset($preservedDecisions[$key]) && $preservedDecisions[$key] === 'rejected') continue;
+                if (!$this->isAutoConfirmableInvoiceCandidate($candidate)) continue;
                 if ($autoConfirmCandidate !== null) {
                     $autoConfirmCandidate = false;
                     break;
                 }
                 $autoConfirmCandidate = $candidate;
             }
-
             if (is_array($autoConfirmCandidate)) {
                 $this->matchManager->upsert(
                     (int) $transactionId,
@@ -157,6 +174,48 @@ class BankSyncCandidateMatcher
                     'confirmed',
                     (int) $userId
                 );
+                $hasConfirmedOrPosted = true;
+            }
+        }
+
+        if (!$hasConfirmedOrPosted) {
+            // A configured destination account + one unique contribution period whose
+            // complete open balance equals the bank transfer is deterministic enough to
+            // confirm all group components automatically. Any preserved rejection blocks
+            // automatic confirmation of the whole group.
+            $groups = array();
+            foreach ($deduped as $candidate) {
+                if (empty($candidate['auto_confirm_group']) || empty($candidate['group_key'])) continue;
+                $gk = (string) $candidate['group_key'];
+                if (!isset($groups[$gk])) $groups[$gk] = array();
+                $groups[$gk][] = $candidate;
+            }
+            if (count($groups) === 1) {
+                $group = reset($groups);
+                $blocked = false;
+                $sum = 0.0;
+                foreach ($group as $candidate) {
+                    $key = (string) $candidate['target_type'].':'.(int) $candidate['target_id'];
+                    if (isset($preservedDecisions[$key]) && $preservedDecisions[$key] === 'rejected') {
+                        $blocked = true;
+                        break;
+                    }
+                    $sum += (float) $candidate['allocated_amount'];
+                }
+                if (!$blocked && $this->moneyEquals($sum, abs((float) $transaction->amount))) {
+                    foreach ($group as $candidate) {
+                        $this->matchManager->upsert(
+                            (int) $transactionId,
+                            (string) $candidate['target_type'],
+                            (int) $candidate['target_id'],
+                            (string) $candidate['allocated_amount'],
+                            100,
+                            'auto-confirm:tax-account+period+group-amount',
+                            'confirmed',
+                            (int) $userId
+                        );
+                    }
+                }
             }
         }
 
@@ -191,24 +250,14 @@ class BankSyncCandidateMatcher
         if (!in_array((string) $candidate['target_type'], array(
             BankSyncMatchManager::TARGET_CUSTOMER_INVOICE,
             BankSyncMatchManager::TARGET_SUPPLIER_INVOICE,
-        ), true)) {
-            return false;
-        }
-        if ((int) $candidate['confidence'] < 100) {
-            return false;
-        }
+        ), true)) return false;
+        if ((int) $candidate['confidence'] < 100) return false;
         $codes = isset($candidate['reason_codes']) && is_array($candidate['reason_codes']) ? $candidate['reason_codes'] : array();
-        if (!in_array('amount', $codes, true) || !in_array('reference', $codes, true)) {
-            return false;
-        }
+        if (!in_array('amount', $codes, true) || !in_array('reference', $codes, true)) return false;
         return in_array('partner', $codes, true) || in_array('account', $codes, true);
     }
 
-    /**
-     * Refresh candidates for a batch of unreconciled transactions.
-     *
-     * @return int Number of transactions scanned
-     */
+    /** @return int Number of transactions scanned */
     public function refreshOpenTransactions($userId, $limit = 100)
     {
         $sql = 'SELECT t.rowid FROM '.$this->db->prefix().'banksync_transaction AS t';
@@ -221,22 +270,12 @@ class BankSyncCandidateMatcher
         $sql .= " AND m.status IN ('confirmed', 'posted'))";
         $sql .= ' ORDER BY t.booking_date DESC, t.rowid DESC';
         $sql .= $this->db->plimit(max(1, (int) $limit), 0);
-
         $resql = $this->db->query($sql);
-        if (!$resql) {
-            throw new RuntimeException($this->db->lasterror());
-        }
-
+        if (!$resql) throw new RuntimeException($this->db->lasterror());
         $ids = array();
-        while ($obj = $this->db->fetch_object($resql)) {
-            $ids[] = (int) $obj->rowid;
-        }
+        while ($obj = $this->db->fetch_object($resql)) $ids[] = (int) $obj->rowid;
         $this->db->free($resql);
-
-        foreach ($ids as $id) {
-            $this->refreshSuggestions($id, $userId);
-        }
-
+        foreach ($ids as $id) $this->refreshSuggestions($id, $userId);
         return count($ids);
     }
 
@@ -249,9 +288,7 @@ class BankSyncCandidateMatcher
         $sql .= ' LEFT JOIN '.$this->db->prefix().'bank_account AS ba ON ba.rowid = a.fk_bank_account';
         $sql .= ' WHERE t.entity = '.$this->entity.' AND t.rowid = '.((int) $transactionId).' LIMIT 1';
         $resql = $this->db->query($sql);
-        if (!$resql) {
-            throw new RuntimeException($this->db->lasterror());
-        }
+        if (!$resql) throw new RuntimeException($this->db->lasterror());
         $obj = $this->db->fetch_object($resql);
         $this->db->free($resql);
         return $obj ?: null;
@@ -263,22 +300,14 @@ class BankSyncCandidateMatcher
         $dateFilter = $this->dateFilter('f.datef', (string) $transaction->booking_date, 365, 45);
         $sql = 'SELECT f.rowid, f.ref, f.ref_client, f.datef, f.date_lim_reglement, f.total_ttc, f.fk_soc, s.nom,';
         $sql .= ' COALESCE((SELECT SUM(pf.amount) FROM '.$this->db->prefix().'paiement_facture AS pf WHERE pf.fk_facture = f.rowid), 0) AS paid_amount';
-        $sql .= ' FROM '.$this->db->prefix().'facture AS f';
-        $sql .= ' INNER JOIN '.$this->db->prefix().'societe AS s ON s.rowid = f.fk_soc';
+        $sql .= ' FROM '.$this->db->prefix().'facture AS f INNER JOIN '.$this->db->prefix().'societe AS s ON s.rowid = f.fk_soc';
         $sql .= ' WHERE f.entity = '.$this->entity.' AND f.paye = 0 AND f.fk_statut = 1 AND f.total_ttc > 0';
-        $sql .= $dateFilter;
-        $sql .= ' ORDER BY f.datef DESC';
-        $sql .= $this->db->plimit(250, 0);
-
+        $sql .= $dateFilter.' ORDER BY f.datef DESC'.$this->db->plimit(250, 0);
         $resql = $this->db->query($sql);
-        if (!$resql) {
-            return $rows;
-        }
+        if (!$resql) return $rows;
         while ($obj = $this->db->fetch_object($resql)) {
             $remaining = max(0, (float) $obj->total_ttc - (float) $obj->paid_amount);
-            if ($remaining <= 0.00001) {
-                continue;
-            }
+            if ($remaining <= 0.00001) continue;
             $candidate = $this->scoreInvoice($transaction, $obj, BankSyncMatchManager::TARGET_CUSTOMER_INVOICE, $remaining, array($obj->ref, $obj->ref_client));
             if ($candidate !== null) {
                 $candidate['url'] = '/compta/facture/card.php?facid='.(int) $obj->rowid;
@@ -295,22 +324,14 @@ class BankSyncCandidateMatcher
         $dateFilter = $this->dateFilter('f.datef', (string) $transaction->booking_date, 365, 45);
         $sql = 'SELECT f.rowid, f.ref, f.ref_supplier, f.datef, f.date_lim_reglement, f.total_ttc, f.fk_soc, s.nom,';
         $sql .= ' COALESCE((SELECT SUM(pf.amount) FROM '.$this->db->prefix().'paiementfourn_facturefourn AS pf WHERE pf.fk_facturefourn = f.rowid), 0) AS paid_amount';
-        $sql .= ' FROM '.$this->db->prefix().'facture_fourn AS f';
-        $sql .= ' INNER JOIN '.$this->db->prefix().'societe AS s ON s.rowid = f.fk_soc';
+        $sql .= ' FROM '.$this->db->prefix().'facture_fourn AS f INNER JOIN '.$this->db->prefix().'societe AS s ON s.rowid = f.fk_soc';
         $sql .= ' WHERE f.entity = '.$this->entity.' AND f.paye = 0 AND f.fk_statut = 1 AND f.total_ttc > 0';
-        $sql .= $dateFilter;
-        $sql .= ' ORDER BY f.datef DESC';
-        $sql .= $this->db->plimit(250, 0);
-
+        $sql .= $dateFilter.' ORDER BY f.datef DESC'.$this->db->plimit(250, 0);
         $resql = $this->db->query($sql);
-        if (!$resql) {
-            return $rows;
-        }
+        if (!$resql) return $rows;
         while ($obj = $this->db->fetch_object($resql)) {
             $remaining = max(0, (float) $obj->total_ttc - (float) $obj->paid_amount);
-            if ($remaining <= 0.00001) {
-                continue;
-            }
+            if ($remaining <= 0.00001) continue;
             $candidate = $this->scoreInvoice($transaction, $obj, BankSyncMatchManager::TARGET_SUPPLIER_INVOICE, $remaining, array($obj->ref_supplier, $obj->ref));
             if ($candidate !== null) {
                 $candidate['url'] = '/fourn/facture/card.php?facid='.(int) $obj->rowid;
@@ -328,88 +349,44 @@ class BankSyncCandidateMatcher
         $reasonCodes = array();
         $amount = abs((float) $transaction->amount);
         $isCard = ((string) $transaction->bank_event_type === 'card');
-
         if ($this->moneyEquals($amount, $remaining)) {
-            $score += 40;
-            $reasons[] = 'Exact amount';
-            $reasonCodes[] = 'amount';
+            $score += 40; $reasons[] = 'Exact amount'; $reasonCodes[] = 'amount';
         } elseif ($remaining > 0 && $amount > 0 && abs($amount - $remaining) / max($amount, $remaining) <= 0.02) {
-            $score += 18;
-            $reasons[] = 'Amount within 2%';
-            $reasonCodes[] = 'amount_near';
+            $score += 18; $reasons[] = 'Amount within 2%'; $reasonCodes[] = 'amount_near';
         }
-
         $referenceStrength = $this->referenceStrength((string) $transaction->reference, $refs);
         if ($referenceStrength === 2) {
-            $score += 45;
-            $reasons[] = 'Invoice reference in bank reference';
-            $reasonCodes[] = 'reference';
+            $score += 45; $reasons[] = 'Invoice reference in bank reference'; $reasonCodes[] = 'reference';
         } elseif ($referenceStrength === 1) {
-            $score += 25;
-            $reasons[] = 'Partial reference match';
-            $reasonCodes[] = 'reference_partial';
+            $score += 25; $reasons[] = 'Partial reference match'; $reasonCodes[] = 'reference_partial';
         }
-
         $account = (string) $transaction->counterparty_account;
         if (!$isCard && $account !== '' && $this->partnerAccountMatches((int) $invoice->fk_soc, $account)) {
-            $score += 35;
-            $reasons[] = 'Counterparty bank account';
-            $reasonCodes[] = 'account';
+            $score += 35; $reasons[] = 'Counterparty bank account'; $reasonCodes[] = 'account';
         }
-
         $nameScore = $this->nameStrength((string) $transaction->counterparty_name, (string) $invoice->nom);
         if ($nameScore >= 2) {
-            $score += $isCard ? 50 : 20;
-            $reasons[] = $isCard ? 'Card merchant name' : 'Counterparty name';
-            $reasonCodes[] = 'partner';
+            $score += $isCard ? 50 : 20; $reasons[] = $isCard ? 'Card merchant name' : 'Counterparty name'; $reasonCodes[] = 'partner';
         } elseif ($nameScore === 1) {
-            $score += $isCard ? 30 : 10;
-            $reasons[] = $isCard ? 'Similar card merchant name' : 'Similar counterparty name';
-            $reasonCodes[] = 'partner_similar';
+            $score += $isCard ? 30 : 10; $reasons[] = $isCard ? 'Similar card merchant name' : 'Similar counterparty name'; $reasonCodes[] = 'partner_similar';
         }
-
         $days = $this->dayDistance((string) $transaction->booking_date, (string) $invoice->datef);
         if ($days !== null) {
             if ($isCard) {
-                if ($days <= 14) {
-                    $score += 15;
-                    $reasons[] = 'Card transaction date within 14 days';
-                    $reasonCodes[] = 'date';
-                } elseif ($days <= 45) {
-                    $score += 10;
-                    $reasons[] = 'Card transaction date within 45 days';
-                    $reasonCodes[] = 'date_near';
-                } elseif ($days <= 90) {
-                    $score += 5;
-                    $reasons[] = 'Card transaction date within 90 days';
-                    $reasonCodes[] = 'date_near';
-                }
+                if ($days <= 14) { $score += 15; $reasons[] = 'Card transaction date within 14 days'; $reasonCodes[] = 'date'; }
+                elseif ($days <= 45) { $score += 10; $reasons[] = 'Card transaction date within 45 days'; $reasonCodes[] = 'date_near'; }
+                elseif ($days <= 90) { $score += 5; $reasons[] = 'Card transaction date within 90 days'; $reasonCodes[] = 'date_near'; }
             } else {
-                if ($days <= 14) {
-                    $score += 10;
-                    $reasons[] = 'Date within 14 days';
-                    $reasonCodes[] = 'date';
-                } elseif ($days <= 60) {
-                    $score += 5;
-                    $reasons[] = 'Date within 60 days';
-                    $reasonCodes[] = 'date_near';
-                }
+                if ($days <= 14) { $score += 10; $reasons[] = 'Date within 14 days'; $reasonCodes[] = 'date'; }
+                elseif ($days <= 60) { $score += 5; $reasons[] = 'Date within 60 days'; $reasonCodes[] = 'date_near'; }
             }
         }
-
         $score = min(100, $score);
-        if ($score < 45) {
-            return null;
-        }
-
+        if ($score < 45) return null;
         $ref = '';
         foreach ($refs as $refCandidate) {
-            if (trim((string) $refCandidate) !== '') {
-                $ref = (string) $refCandidate;
-                break;
-            }
+            if (trim((string) $refCandidate) !== '') { $ref = (string) $refCandidate; break; }
         }
-
         return array(
             'target_type' => $targetType,
             'target_id' => (int) $invoice->rowid,
@@ -432,82 +409,35 @@ class BankSyncCandidateMatcher
         $rows = array();
         $periodFilter = $this->dateFilter('COALESCE(s.dateep, s.datesp, s.datep)', (string) $transaction->booking_date, 180, 45);
         $sql = 'SELECT s.rowid, s.ref, s.datep, s.datev, s.amount, s.label, s.datesp, s.dateep, s.fk_user,';
-        $sql .= ' u.firstname, u.lastname,';
-        $sql .= ' COALESCE((SELECT SUM(ps.amount) FROM '.$this->db->prefix().'payment_salary AS ps WHERE ps.fk_salary = s.rowid), 0) AS paid_amount';
-        $sql .= ' FROM '.$this->db->prefix().'salary AS s';
-        $sql .= ' INNER JOIN '.$this->db->prefix().'user AS u ON u.rowid = s.fk_user';
+        $sql .= ' u.firstname, u.lastname, COALESCE((SELECT SUM(ps.amount) FROM '.$this->db->prefix().'payment_salary AS ps WHERE ps.fk_salary = s.rowid), 0) AS paid_amount';
+        $sql .= ' FROM '.$this->db->prefix().'salary AS s INNER JOIN '.$this->db->prefix().'user AS u ON u.rowid = s.fk_user';
         $sql .= ' WHERE s.entity = '.$this->entity.' AND s.paye = 0 AND s.amount > 0';
-        $sql .= $periodFilter;
-        $sql .= ' ORDER BY COALESCE(s.dateep, s.datesp, s.datep) DESC, s.rowid DESC';
-        $sql .= $this->db->plimit(150, 0);
+        $sql .= $periodFilter.' ORDER BY COALESCE(s.dateep, s.datesp, s.datep) DESC, s.rowid DESC'.$this->db->plimit(150, 0);
         $resql = $this->db->query($sql);
-        if (!$resql) {
-            return $rows;
-        }
-
+        if (!$resql) return $rows;
         $bankText = $this->normalizeText((string) $transaction->counterparty_name.' '.(string) $transaction->reference);
         $salaryMarker = $this->containsAny($bankText, array('munkaber', 'berfizetes', 'salary', 'wage', 'payroll'));
         $amount = abs((float) $transaction->amount);
-
         while ($obj = $this->db->fetch_object($resql)) {
             $remaining = max(0, (float) $obj->amount - (float) $obj->paid_amount);
-            if ($remaining <= 0.00001) {
-                continue;
-            }
-            $score = 0;
-            $reasons = array();
-            $reasonCodes = array();
-
-            if ($this->moneyEquals($amount, $remaining)) {
-                $score += 45;
-                $reasons[] = 'Exact amount';
-                $reasonCodes[] = 'amount';
-            } elseif ($remaining > 0 && $amount > 0 && abs($amount - $remaining) / max($amount, $remaining) <= 0.02) {
-                $score += 20;
-                $reasons[] = 'Amount within 2%';
-                $reasonCodes[] = 'amount_near';
-            }
-            if ($salaryMarker) {
-                $score += 25;
-                $reasons[] = 'Salary marker in bank text';
-                $reasonCodes[] = 'salary_marker';
-            }
-
+            if ($remaining <= 0.00001) continue;
+            $score = 0; $reasons = array(); $reasonCodes = array();
+            if ($this->moneyEquals($amount, $remaining)) { $score += 45; $reasons[] = 'Exact amount'; $reasonCodes[] = 'amount'; }
+            elseif ($remaining > 0 && $amount > 0 && abs($amount - $remaining) / max($amount, $remaining) <= 0.02) { $score += 20; $reasons[] = 'Amount within 2%'; $reasonCodes[] = 'amount_near'; }
+            if ($salaryMarker) { $score += 25; $reasons[] = 'Salary marker in bank text'; $reasonCodes[] = 'salary_marker'; }
             $employee = trim((string) $obj->lastname.' '.(string) $obj->firstname);
             $nameScore = $this->nameStrength((string) $transaction->counterparty_name, $employee);
-            if ($nameScore >= 2) {
-                $score += 30;
-                $reasons[] = 'Employee name';
-                $reasonCodes[] = 'employee';
-            } elseif ($nameScore === 1) {
-                $score += 15;
-                $reasons[] = 'Similar employee name';
-                $reasonCodes[] = 'employee_similar';
-            }
-
+            if ($nameScore >= 2) { $score += 30; $reasons[] = 'Employee name'; $reasonCodes[] = 'employee'; }
+            elseif ($nameScore === 1) { $score += 15; $reasons[] = 'Similar employee name'; $reasonCodes[] = 'employee_similar'; }
             $periodStart = (string) $obj->datesp;
             $periodEnd = (string) $obj->dateep;
             $periodDate = trim($periodEnd) !== '' ? $periodEnd : (trim($periodStart) !== '' ? $periodStart : (string) $obj->datep);
             $days = $this->dayDistance((string) $transaction->booking_date, $periodDate);
-            if ($days !== null && $days <= 10) {
-                $score += 20;
-                $reasons[] = 'Salary period close to bank date';
-                $reasonCodes[] = 'salary_period';
-            } elseif ($days !== null && $days <= 31) {
-                $score += 10;
-                $reasons[] = 'Salary period near bank date';
-                $reasonCodes[] = 'date';
-            } elseif ($days !== null && $days <= 62) {
-                $score += 5;
-                $reasons[] = 'Salary period within 62 days';
-                $reasonCodes[] = 'date_near';
-            }
-
+            if ($days !== null && $days <= 10) { $score += 20; $reasons[] = 'Salary period close to bank date'; $reasonCodes[] = 'salary_period'; }
+            elseif ($days !== null && $days <= 31) { $score += 10; $reasons[] = 'Salary period near bank date'; $reasonCodes[] = 'date'; }
+            elseif ($days !== null && $days <= 62) { $score += 5; $reasons[] = 'Salary period within 62 days'; $reasonCodes[] = 'date_near'; }
             $score = min(100, $score);
-            if ($score < 45) {
-                continue;
-            }
-
+            if ($score < 45) continue;
             $rows[] = array(
                 'target_type' => BankSyncMatchManager::TARGET_SALARY,
                 'target_id' => (int) $obj->rowid,
@@ -530,80 +460,129 @@ class BankSyncCandidateMatcher
         return $rows;
     }
 
-    private function findSocialContributions($transaction)
+    /**
+     * Social/fiscal contribution candidates. With an explicit destination-account
+     * mapping we group open contributions by contribution type + accounting period and
+     * compare the whole group's open balance to the bank transfer.
+     */
+    private function findSocialContributions($transaction, $taxMapping = null)
     {
         $rows = array();
         $dateFilter = $this->dateFilter('c.date_ech', (string) $transaction->booking_date, 180, 90);
         $sql = 'SELECT c.rowid, c.ref, c.date_ech, c.libelle, c.amount, c.periode, c.fk_type,';
         $sql .= ' ct.libelle AS type_label, ct.code AS type_code,';
         $sql .= ' COALESCE((SELECT SUM(pc.amount) FROM '.$this->db->prefix().'paiementcharge AS pc WHERE pc.fk_charge = c.rowid), 0) AS paid_amount';
-        $sql .= ' FROM '.$this->db->prefix().'chargesociales AS c';
-        $sql .= ' LEFT JOIN '.$this->db->prefix().'c_chargesociales AS ct ON ct.id = c.fk_type';
+        $sql .= ' FROM '.$this->db->prefix().'chargesociales AS c LEFT JOIN '.$this->db->prefix().'c_chargesociales AS ct ON ct.id = c.fk_type';
         $sql .= ' WHERE c.entity = '.$this->entity.' AND c.paye = 0 AND c.amount > 0';
-        $sql .= $dateFilter;
-        $sql .= ' ORDER BY c.date_ech DESC, c.rowid DESC';
-        $sql .= $this->db->plimit(150, 0);
+        if ($taxMapping && (int) $taxMapping->fk_charge_type > 0) $sql .= ' AND c.fk_type = '.((int) $taxMapping->fk_charge_type);
+        $sql .= $dateFilter.' ORDER BY c.periode DESC, c.date_ech DESC, c.rowid DESC'.$this->db->plimit(250, 0);
         $resql = $this->db->query($sql);
-        if (!$resql) {
-            return $rows;
-        }
+        if (!$resql) return $rows;
 
         $bankText = $this->normalizeText((string) $transaction->counterparty_name.' '.(string) $transaction->reference);
         $taxMarker = $this->containsAny($bankText, array('nav', 'ado', 'jarulek', 'szocho', 'szja', 'tb', 'social', 'tax'));
         $amount = abs((float) $transaction->amount);
-
+        $open = array();
         while ($obj = $this->db->fetch_object($resql)) {
             $remaining = max(0, (float) $obj->amount - (float) $obj->paid_amount);
-            if ($remaining <= 0.00001) {
-                continue;
+            if ($remaining <= 0.00001) continue;
+            $obj->_remaining = $remaining;
+            $open[] = $obj;
+        }
+        $this->db->free($resql);
+
+        if ($taxMapping) {
+            $groups = array();
+            foreach ($open as $obj) {
+                $period = trim((string) $obj->periode);
+                if ($period === '') $period = trim((string) $obj->date_ech);
+                $groupKey = 'tax:'.((int) $obj->fk_type).':'.$period;
+                if (!isset($groups[$groupKey])) {
+                    $groups[$groupKey] = array('period' => $period, 'total' => 0.0, 'items' => array(), 'due_date' => (string) $obj->date_ech);
+                }
+                $groups[$groupKey]['total'] += (float) $obj->_remaining;
+                $groups[$groupKey]['items'][] = $obj;
+                if ((string) $obj->date_ech > (string) $groups[$groupKey]['due_date']) $groups[$groupKey]['due_date'] = (string) $obj->date_ech;
             }
 
-            $score = 0;
-            $reasons = array();
-            $reasonCodes = array();
-            if ($this->moneyEquals($amount, $remaining)) {
-                $score += 45;
-                $reasons[] = 'Exact amount';
-                $reasonCodes[] = 'amount';
+            $exactGroupKeys = array();
+            foreach ($groups as $groupKey => $group) {
+                if ($this->moneyEquals($amount, (float) $group['total'])) $exactGroupKeys[] = $groupKey;
             }
-            if ($taxMarker) {
-                $score += 20;
-                $reasons[] = 'Tax/social contribution marker';
-                $reasonCodes[] = 'tax_marker';
-            }
+            $uniqueExactGroup = count($exactGroupKeys) === 1 ? (string) $exactGroupKeys[0] : '';
 
+            foreach ($groups as $groupKey => $group) {
+                $groupTotal = (float) $group['total'];
+                $exactGroup = $this->moneyEquals($amount, $groupTotal);
+                $days = $this->dayDistance((string) $transaction->booking_date, (string) $group['due_date']);
+                foreach ($group['items'] as $obj) {
+                    $score = 50;
+                    $reasons = array('Configured destination bank account');
+                    $reasonCodes = array('tax_account');
+                    if ($exactGroup) {
+                        $score += 35;
+                        $reasons[] = 'Exact grouped open balance';
+                        $reasonCodes[] = 'amount_group';
+                    }
+                    if ($taxMarker) {
+                        $score += 5;
+                        $reasons[] = 'Tax/social contribution marker';
+                        $reasonCodes[] = 'tax_marker';
+                    }
+                    if ($days !== null && $days <= 45) {
+                        $score += 10;
+                        $reasons[] = 'Contribution period/due date close to bank date';
+                        $reasonCodes[] = 'tax_period';
+                    } elseif ($days !== null && $days <= 90) {
+                        $score += 5;
+                        $reasons[] = 'Contribution period/due date within 90 days';
+                        $reasonCodes[] = 'date_near';
+                    }
+                    $score = min(100, $score);
+                    $label = trim((string) $obj->libelle);
+                    if (trim((string) $obj->type_label) !== '') $label .= ($label !== '' ? ' — ' : '').(string) $obj->type_label;
+                    $rows[] = array(
+                        'target_type' => BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION,
+                        'target_id' => (int) $obj->rowid,
+                        'ref' => trim((string) $obj->ref) !== '' ? (string) $obj->ref : '#'.(int) $obj->rowid,
+                        'label' => $label,
+                        'date' => (string) $group['period'],
+                        'remaining_amount' => $this->decimalString((float) $obj->_remaining),
+                        'allocated_amount' => $this->decimalString((float) $obj->_remaining),
+                        'confidence' => $score,
+                        'reasons' => $reasons,
+                        'reason_codes' => $reasonCodes,
+                        'date_distance' => $days === null ? PHP_INT_MAX : $days,
+                        'amount_distance' => abs($amount - $groupTotal),
+                        'url' => '/compta/sociales/card.php?id='.(int) $obj->rowid,
+                        'group_key' => $groupKey,
+                        'group_label' => trim((string) $taxMapping->type_label).' — '.(string) $group['period'],
+                        'group_total' => $this->decimalString($groupTotal),
+                        'group_count' => count($group['items']),
+                        'auto_confirm_group' => ($uniqueExactGroup !== '' && $groupKey === $uniqueExactGroup && ($days === null || $days <= 90)),
+                    );
+                }
+            }
+            return $rows;
+        }
+
+        // No explicit mapping: retain the advisory per-item heuristic.
+        foreach ($open as $obj) {
+            $remaining = (float) $obj->_remaining;
+            $score = 0; $reasons = array(); $reasonCodes = array();
+            if ($this->moneyEquals($amount, $remaining)) { $score += 45; $reasons[] = 'Exact amount'; $reasonCodes[] = 'amount'; }
+            if ($taxMarker) { $score += 20; $reasons[] = 'Tax/social contribution marker'; $reasonCodes[] = 'tax_marker'; }
             $targetText = $this->normalizeText((string) $obj->libelle.' '.(string) $obj->type_label.' '.(string) $obj->type_code);
             $overlap = $this->tokenOverlap($bankText, $targetText);
-            if ($overlap >= 2) {
-                $score += 25;
-                $reasons[] = 'Matching tax/contribution terms';
-                $reasonCodes[] = 'label';
-            } elseif ($overlap === 1) {
-                $score += 12;
-                $reasons[] = 'One matching tax/contribution term';
-                $reasonCodes[] = 'label_partial';
-            }
-
+            if ($overlap >= 2) { $score += 25; $reasons[] = 'Matching tax/contribution terms'; $reasonCodes[] = 'label'; }
+            elseif ($overlap === 1) { $score += 12; $reasons[] = 'One matching tax/contribution term'; $reasonCodes[] = 'label_partial'; }
             $days = $this->dayDistance((string) $transaction->booking_date, (string) $obj->date_ech);
-            if ($days !== null && $days <= 31) {
-                $score += 10;
-                $reasons[] = 'Due date proximity';
-                $reasonCodes[] = 'date';
-            } elseif ($days !== null && $days <= 90) {
-                $score += 5;
-                $reasons[] = 'Due date within 90 days';
-                $reasonCodes[] = 'date_near';
-            }
-
+            if ($days !== null && $days <= 31) { $score += 10; $reasons[] = 'Due date proximity'; $reasonCodes[] = 'date'; }
+            elseif ($days !== null && $days <= 90) { $score += 5; $reasons[] = 'Due date within 90 days'; $reasonCodes[] = 'date_near'; }
             $score = min(100, $score);
-            if ($score < 50) {
-                continue;
-            }
-
+            if ($score < 50) continue;
             $label = trim((string) $obj->libelle);
-            if (trim((string) $obj->type_label) !== '') {
-                $label .= ($label !== '' ? ' — ' : '').(string) $obj->type_label;
-            }
+            if (trim((string) $obj->type_label) !== '') $label .= ($label !== '' ? ' — ' : '').(string) $obj->type_label;
             $rows[] = array(
                 'target_type' => BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION,
                 'target_id' => (int) $obj->rowid,
@@ -615,37 +594,29 @@ class BankSyncCandidateMatcher
                 'confidence' => $score,
                 'reasons' => $reasons,
                 'reason_codes' => $reasonCodes,
+                'date_distance' => $days === null ? PHP_INT_MAX : $days,
+                'amount_distance' => abs($amount - $remaining),
                 'url' => '/compta/sociales/card.php?id='.(int) $obj->rowid,
             );
         }
-        $this->db->free($resql);
         return $rows;
     }
 
     private function partnerAccountMatches($partnerId, $bankAccount)
     {
         $partnerId = (int) $partnerId;
-        if ($partnerId <= 0) {
-            return false;
-        }
+        if ($partnerId <= 0) return false;
         if (!isset($this->partnerAccounts[$partnerId])) {
             $this->partnerAccounts[$partnerId] = array();
-            $sql = 'SELECT number, iban_prefix, code_banque, code_guichet, cle_rib';
-            $sql .= ' FROM '.$this->db->prefix().'societe_rib';
+            $sql = 'SELECT number, iban_prefix, code_banque, code_guichet, cle_rib FROM '.$this->db->prefix().'societe_rib';
             $sql .= ' WHERE fk_soc = '.$partnerId.' AND entity = '.$this->entity." AND type = 'ban' AND status = 1";
             $resql = $this->db->query($sql);
             if ($resql) {
                 while ($obj = $this->db->fetch_object($resql)) {
-                    $values = array(
-                        (string) $obj->number,
-                        (string) $obj->iban_prefix,
-                        (string) $obj->code_banque.(string) $obj->code_guichet.(string) $obj->number.(string) $obj->cle_rib,
-                    );
+                    $values = array((string) $obj->number, (string) $obj->iban_prefix, (string) $obj->code_banque.(string) $obj->code_guichet.(string) $obj->number.(string) $obj->cle_rib);
                     foreach ($values as $value) {
                         $normalized = $this->normalizeAccount($value);
-                        if ($normalized !== '') {
-                            $this->partnerAccounts[$partnerId][$normalized] = $normalized;
-                        }
+                        if ($normalized !== '') $this->partnerAccounts[$partnerId][$normalized] = $normalized;
                     }
                 }
                 $this->db->free($resql);
@@ -658,22 +629,14 @@ class BankSyncCandidateMatcher
     private function referenceStrength($bankReference, array $refs)
     {
         $bank = $this->normalizeReference($bankReference);
-        if ($bank === '') {
-            return 0;
-        }
+        if ($bank === '') return 0;
         foreach ($refs as $ref) {
             $candidate = $this->normalizeReference((string) $ref);
-            if (strlen($candidate) < 4) {
-                continue;
-            }
-            if ($bank === $candidate || strpos($bank, $candidate) !== false) {
-                return 2;
-            }
+            if (strlen($candidate) < 4) continue;
+            if ($bank === $candidate || strpos($bank, $candidate) !== false) return 2;
             if (strlen($candidate) >= 6) {
                 $tail = substr($candidate, -6);
-                if ($tail !== '' && strpos($bank, $tail) !== false) {
-                    return 1;
-                }
+                if ($tail !== '' && strpos($bank, $tail) !== false) return 1;
             }
         }
         return 0;
@@ -683,17 +646,11 @@ class BankSyncCandidateMatcher
     {
         $a = $this->normalizeCompanyName($bankName);
         $b = $this->normalizeCompanyName($targetName);
-        if ($a === '' || $b === '') {
-            return 0;
-        }
+        if ($a === '' || $b === '') return 0;
         $compactA = str_replace(' ', '', $a);
         $compactB = str_replace(' ', '', $b);
-        if ($a === $b || strpos($a, $b) !== false || strpos($b, $a) !== false) {
-            return 2;
-        }
-        if (strlen($compactA) >= 4 && strlen($compactB) >= 4 && ($compactA === $compactB || strpos($compactA, $compactB) !== false || strpos($compactB, $compactA) !== false)) {
-            return 2;
-        }
+        if ($a === $b || strpos($a, $b) !== false || strpos($b, $a) !== false) return 2;
+        if (strlen($compactA) >= 4 && strlen($compactB) >= 4 && ($compactA === $compactB || strpos($compactA, $compactB) !== false || strpos($compactB, $compactA) !== false)) return 2;
         similar_text($a, $b, $percentSpaced);
         similar_text($compactA, $compactB, $percentCompact);
         return max($percentSpaced, $percentCompact) >= 72 ? 1 : 0;
@@ -704,38 +661,29 @@ class BankSyncCandidateMatcher
         $stop = array('nav' => true, 'kft' => true, 'bt' => true, 'zrt' => true, 'ado' => true, 'tax' => true);
         $ta = array_filter(explode(' ', $a), function ($v) use ($stop) { return strlen($v) >= 2 && !isset($stop[$v]); });
         $tb = array_filter(explode(' ', $b), function ($v) use ($stop) { return strlen($v) >= 2 && !isset($stop[$v]); });
-        if (empty($ta) || empty($tb)) {
-            return 0;
-        }
+        if (empty($ta) || empty($tb)) return 0;
         return count(array_intersect(array_unique($ta), array_unique($tb)));
     }
 
     private function dateFilter($field, $bookingDate, $daysBack, $daysForward)
     {
-        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $bookingDate)) {
-            return '';
-        }
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $bookingDate)) return '';
         $date = $this->db->escape($bookingDate);
         return " AND {$field} BETWEEN DATE_SUB('{$date}', INTERVAL ".((int) $daysBack)." DAY) AND DATE_ADD('{$date}', INTERVAL ".((int) $daysForward)." DAY)";
     }
 
     private function dayDistance($dateA, $dateB)
     {
-        if (!preg_match('/^\d{4}-\d{2}-\d{2}/', $dateA) || !preg_match('/^\d{4}-\d{2}-\d{2}/', $dateB)) {
-            return null;
-        }
+        if (!preg_match('/^\d{4}-\d{2}-\d{2}/', $dateA) || !preg_match('/^\d{4}-\d{2}-\d{2}/', $dateB)) return null;
         $a = strtotime(substr($dateA, 0, 10));
         $b = strtotime(substr($dateB, 0, 10));
-        if ($a === false || $b === false) {
-            return null;
-        }
+        if ($a === false || $b === false) return null;
         return (int) floor(abs($a - $b) / 86400);
     }
 
     private function salaryPeriodLabel($start, $end, $fallback = '')
     {
-        $start = trim((string) $start);
-        $end = trim((string) $end);
+        $start = trim((string) $start); $end = trim((string) $end);
         if ($start !== '' && $end !== '') return $start.' – '.$end;
         if ($start !== '') return $start;
         if ($end !== '') return $end;
@@ -782,20 +730,17 @@ class BankSyncCandidateMatcher
     {
         if (function_exists('iconv')) {
             $converted = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', $value);
-            if ($converted !== false) {
-                return $converted;
-            }
+            if ($converted !== false) return $converted;
         }
-        return $value;
+        return strtr((string) $value, array(
+            'á'=>'a','Á'=>'A','é'=>'e','É'=>'E','í'=>'i','Í'=>'I','ó'=>'o','Ó'=>'O','ö'=>'o','Ö'=>'O','ő'=>'o','Ő'=>'O',
+            'ú'=>'u','Ú'=>'U','ü'=>'u','Ü'=>'U','ű'=>'u','Ű'=>'U','ä'=>'a','Ä'=>'A','ß'=>'ss','č'=>'c','Č'=>'C','š'=>'s','Š'=>'S','ž'=>'z','Ž'=>'Z'
+        ));
     }
 
     private function containsAny($haystack, array $needles)
     {
-        foreach ($needles as $needle) {
-            if ($needle !== '' && strpos($haystack, $needle) !== false) {
-                return true;
-            }
-        }
+        foreach ($needles as $needle) if ($needle !== '' && strpos($haystack, $needle) !== false) return true;
         return false;
     }
 }
