@@ -9,6 +9,8 @@ require_once DOL_DOCUMENT_ROOT.'/compta/bank/class/account.class.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/bank/class/paymentvarious.class.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/sociales/class/chargesociales.class.php';
 require_once DOL_DOCUMENT_ROOT.'/compta/sociales/class/paymentsocialcontribution.class.php';
+require_once DOL_DOCUMENT_ROOT.'/compta/tva/class/tva.class.php';
+require_once DOL_DOCUMENT_ROOT.'/compta/tva/class/paymentvat.class.php';
 require_once DOL_DOCUMENT_ROOT.'/societe/class/societe.class.php';
 require_once DOL_DOCUMENT_ROOT.'/accountancy/class/accountingaccount.class.php';
 require_once __DIR__.'/banksyncmatchmanager.class.php';
@@ -52,7 +54,8 @@ class BankSyncPostingService
             'payment_mode_id' => 0,
             'bank_account_id' => !empty($transaction->fk_bank_account) ? (int) $transaction->fk_bank_account : 0,
             'bank_account_label' => trim((string) (!empty($transaction->bank_account_label) ? $transaction->bank_account_label : $transaction->bank_account_ref)),
-            'bank_amount' => abs((float) $transaction->amount),
+            'bank_amount' => abs((float) $transaction->amount,
+            ),
             'signed_bank_amount' => (float) $transaction->amount,
             'currency' => (string) $transaction->currency,
             'booking_date' => (string) $transaction->booking_date,
@@ -95,8 +98,6 @@ class BankSyncPostingService
             $preview['errors'][] = 'BankSyncPostingForeignCurrencyNotSupportedYet';
         }
 
-        // Bank fees use the native PaymentVarious object. PaymentVarious creates
-        // and links its own native bank line through Account::addline().
         if ((string) $transaction->bank_event_type === 'bank_fee') {
             $preview['kind'] = BankSyncMatchManager::TARGET_BANK_FEE;
             $preview['payment_code'] = $this->inferBankFeePaymentCode($transaction);
@@ -110,9 +111,7 @@ class BankSyncPostingService
                 } else {
                     $accountingAccount = new AccountingAccount($this->db);
                     $accountResult = $accountingAccount->fetch(0, (string) $preview['bank_fee_accountancy_code'], 1);
-                    if ($accountResult <= 0 || empty($accountingAccount->active)) {
-                        $preview['errors'][] = 'BankSyncPostingBankFeeAccountancyCodeInvalid';
-                    }
+                    if ($accountResult <= 0 || empty($accountingAccount->active)) $preview['errors'][] = 'BankSyncPostingBankFeeAccountancyCodeInvalid';
                 }
             }
 
@@ -154,6 +153,7 @@ class BankSyncPostingService
             BankSyncMatchManager::TARGET_CUSTOMER_INVOICE,
             BankSyncMatchManager::TARGET_SUPPLIER_INVOICE,
             BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION,
+            BankSyncMatchManager::TARGET_VAT,
         ), true)) {
             $preview['errors'][] = 'BankSyncPostingTargetNotSupportedYet';
             return $preview;
@@ -183,6 +183,7 @@ class BankSyncPostingService
                 continue;
             }
 
+            $invoiceThirdpartyId = 0;
             if ($targetType === BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION) {
                 $charge = new ChargeSociales($this->db);
                 if ($charge->fetch((int) $match->target_id) <= 0) {
@@ -196,7 +197,16 @@ class BankSyncPostingService
                 if (trim((string) $charge->type_label) !== '') $label .= ($label !== '' ? ' — ' : '').(string) $charge->type_label;
                 if ($period !== '') $label .= ' ['.$period.']';
                 $url = '/compta/sociales/card.php?id='.(int) $charge->id;
-                $invoiceThirdpartyId = 0;
+            } elseif ($targetType === BankSyncMatchManager::TARGET_VAT) {
+                $vat = new Tva($this->db);
+                if ($vat->fetch((int) $match->target_id) <= 0) {
+                    $preview['errors'][] = 'BankSyncPostingVatNotFound';
+                    continue;
+                }
+                $remaining = (float) $vat->amount - (float) $vat->getSommePaiement();
+                $ref = '#'.(int) $vat->id;
+                $label = trim((string) $vat->label) !== '' ? (string) $vat->label : 'VAT';
+                $url = '/compta/tva/card.php?id='.(int) $vat->id;
             } elseif ($targetType === BankSyncMatchManager::TARGET_CUSTOMER_INVOICE) {
                 $invoice = new Facture($this->db);
                 if ($invoice->fetch((int) $match->target_id) <= 0) {
@@ -223,7 +233,7 @@ class BankSyncPostingService
                 $label = !empty($invoice->thirdparty->name) ? (string) $invoice->thirdparty->name : '';
             }
 
-            if ($targetType !== BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION) {
+            if (in_array($targetType, array(BankSyncMatchManager::TARGET_CUSTOMER_INVOICE, BankSyncMatchManager::TARGET_SUPPLIER_INVOICE), true)) {
                 if ($thirdpartyId === 0) $thirdpartyId = $invoiceThirdpartyId;
                 elseif ($invoiceThirdpartyId !== $thirdpartyId) $preview['errors'][] = 'BankSyncPostingMultipleThirdparties';
 
@@ -252,11 +262,10 @@ class BankSyncPostingService
 
         if (!$existingIsPosted && $targetType === BankSyncMatchManager::TARGET_CUSTOMER_INVOICE && (float) $transaction->amount < 0) $preview['errors'][] = 'BankSyncPostingUnexpectedDirection';
         if (!$existingIsPosted && $targetType === BankSyncMatchManager::TARGET_SUPPLIER_INVOICE && (float) $transaction->amount > 0) $preview['errors'][] = 'BankSyncPostingUnexpectedDirection';
-        if (!$existingIsPosted && $targetType === BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION && (float) $transaction->amount > 0) $preview['errors'][] = 'BankSyncPostingUnexpectedDirection';
+        if (!$existingIsPosted && in_array($targetType, array(BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION, BankSyncMatchManager::TARGET_VAT), true) && (float) $transaction->amount > 0) $preview['errors'][] = 'BankSyncPostingUnexpectedDirection';
 
-        if ($targetType === BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION && count($preview['rows']) > 1) {
-            $preview['warnings'][] = 'BankSyncPostingSocialContributionSplitBankLines';
-        }
+        if ($targetType === BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION && count($preview['rows']) > 1) $preview['warnings'][] = 'BankSyncPostingSocialContributionSplitBankLines';
+        if ($targetType === BankSyncMatchManager::TARGET_VAT && count($preview['rows']) > 1) $preview['warnings'][] = 'BankSyncPostingVatSplitBankLines';
 
         $preview['thirdparty_id'] = $thirdpartyId;
         $preview['postable'] = empty($preview['errors']);
@@ -280,6 +289,8 @@ class BankSyncPostingService
                 $native = $this->postInvoicePayment($transaction, $preview, $user);
             } elseif ((string) $preview['kind'] === BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION) {
                 $native = $this->postSocialContributions($transaction, $preview, $user);
+            } elseif ((string) $preview['kind'] === BankSyncMatchManager::TARGET_VAT) {
+                $native = $this->postVatPayments($transaction, $preview, $user);
             } elseif ((string) $preview['kind'] === BankSyncMatchManager::TARGET_BANK_FEE) {
                 $native = $this->postBankFee($transaction, $preview, $user);
             } else {
@@ -356,14 +367,7 @@ class BankSyncPostingService
         return array('native_object_type' => $nativeType, 'native_object_id' => (int) $paymentId, 'bank_line_id' => (int) $bankLineId, 'items' => array());
     }
 
-    /**
-     * Create one native PaymentSocialContribution per Dolibarr charge. Dolibarr 23's
-     * payment object stores one fk_charge per payment record, so a grouped physical bank
-     * transfer is represented by several native payment/bank rows whose sum equals the
-     * imported bank transaction. BankSync keeps them together in posting_item audit rows.
-     *
-     * @return array<string,mixed>
-     */
+    /** @return array<string,mixed> */
     private function postSocialContributions($transaction, $preview, $user)
     {
         $items = array();
@@ -400,6 +404,49 @@ class BankSyncPostingService
         $first = $items[0];
         return array(
             'native_object_type' => 'payment_social',
+            'native_object_id' => (int) $first['native_object_id'],
+            'bank_line_id' => (int) $first['bank_line_id'],
+            'items' => $items,
+        );
+    }
+
+    /** @return array<string,mixed> */
+    private function postVatPayments($transaction, $preview, $user)
+    {
+        $items = array();
+        foreach ($preview['rows'] as $row) {
+            $vatId = (int) $row['target_id'];
+            $amount = (float) $row['allocated_amount'];
+            $payment = new PaymentVAT($this->db);
+            $payment->chid = $vatId;
+            $payment->fk_tva = $vatId;
+            $payment->datepaye = $this->sqlDateToTimestamp((string) $preview['booking_date']);
+            $payment->amounts = array($vatId => $amount);
+            $payment->paiementtype = (int) $preview['payment_mode_id'];
+            $payment->fk_typepaiement = (int) $preview['payment_mode_id'];
+            $payment->num_payment = $this->bankReference($transaction);
+            $payment->note = $this->auditNote($transaction);
+            $payment->note_private = $payment->note;
+
+            $paymentId = $payment->create($user, 1);
+            if ($paymentId <= 0) throw new RuntimeException($payment->error ? $payment->error : 'BankSyncPostingPaymentCreateFailed');
+            $result = $payment->addPaymentToBank($user, 'payment_vat', '(VATPayment)', (int) $preview['bank_account_id'], '', '');
+            if ($result <= 0) throw new RuntimeException($payment->error ? $payment->error : 'BankSyncPostingBankLineCreateFailed');
+            if ($payment->fetch((int) $paymentId) <= 0 || (int) $payment->fk_bank <= 0) throw new RuntimeException('BankSyncPostingBankLineCreateFailed');
+
+            $items[] = array(
+                'target_type' => BankSyncMatchManager::TARGET_VAT,
+                'target_id' => $vatId,
+                'native_object_type' => 'payment_vat',
+                'native_object_id' => (int) $paymentId,
+                'bank_line_id' => (int) $payment->fk_bank,
+                'amount' => $amount,
+            );
+        }
+        if (empty($items)) throw new RuntimeException('BankSyncPostingNoConfirmedMatches');
+        $first = $items[0];
+        return array(
+            'native_object_type' => 'payment_vat',
             'native_object_id' => (int) $first['native_object_id'],
             'bank_line_id' => (int) $first['bank_line_id'],
             'items' => $items,
