@@ -4,9 +4,10 @@
 /**
  * Maps destination bank account numbers to Dolibarr social/fiscal contribution types.
  *
- * The bank account is treated as an explicit reconciliation signal. Multiple account
- * numbers may point to the same Dolibarr contribution type, but one normalized account
- * number can only identify one type inside an entity.
+ * The bank account is treated as an explicit reconciliation signal. One destination
+ * account may map to multiple Dolibarr contribution types (for example related TB
+ * categories paid to the same authority account), and one contribution type may also
+ * have multiple historical/current destination accounts.
  */
 class BankSyncTaxAccountManager
 {
@@ -35,7 +36,7 @@ class BankSyncTaxAccountManager
         $sql .= ' FROM '.$this->db->prefix().'banksync_tax_account_map AS m';
         $sql .= ' LEFT JOIN '.$this->db->prefix().'c_chargesociales AS c ON c.id = m.fk_charge_type';
         $sql .= ' WHERE m.entity = '.$this->entity;
-        $sql .= ' ORDER BY c.libelle ASC, m.target_account_number ASC';
+        $sql .= ' ORDER BY m.target_account_number ASC, c.libelle ASC';
         $resql = $this->db->query($sql);
         if (!$resql) throw new RuntimeException($this->db->lasterror());
         while ($obj = $this->db->fetch_object($resql)) $rows[] = $obj;
@@ -43,11 +44,12 @@ class BankSyncTaxAccountManager
         return $rows;
     }
 
-    /** @return object|null */
-    public function findByAccount($accountNumber)
+    /** @return array<int,object> */
+    public function getMappingsByAccount($accountNumber)
     {
+        $rows = array();
         $normalized = self::normalizeAccount($accountNumber);
-        if ($normalized === '') return null;
+        if ($normalized === '') return $rows;
 
         $sql = 'SELECT m.rowid, m.target_account_number, m.fk_charge_type, m.label, m.active,';
         $sql .= ' c.code AS type_code, c.libelle AS type_label';
@@ -55,21 +57,26 @@ class BankSyncTaxAccountManager
         $sql .= ' LEFT JOIN '.$this->db->prefix().'c_chargesociales AS c ON c.id = m.fk_charge_type';
         $sql .= ' WHERE m.entity = '.$this->entity;
         $sql .= " AND m.target_account_number = '".$this->db->escape($normalized)."'";
-        $sql .= ' AND m.active = 1 LIMIT 1';
+        $sql .= ' AND m.active = 1 ORDER BY c.libelle ASC, m.rowid ASC';
         $resql = $this->db->query($sql);
         if (!$resql) throw new RuntimeException($this->db->lasterror());
-        $obj = $this->db->fetch_object($resql);
+        while ($obj = $this->db->fetch_object($resql)) $rows[] = $obj;
         $this->db->free($resql);
-        return $obj ?: null;
+        return $rows;
+    }
+
+    /** @return object|null Backward-compatible convenience accessor. */
+    public function findByAccount($accountNumber)
+    {
+        $rows = $this->getMappingsByAccount($accountNumber);
+        return !empty($rows) ? $rows[0] : null;
     }
 
     public function save($accountNumber, $chargeTypeId, $label, $userId)
     {
         $normalized = self::normalizeAccount($accountNumber);
         $chargeTypeId = (int) $chargeTypeId;
-        if ($normalized === '' || $chargeTypeId <= 0) {
-            throw new InvalidArgumentException('Invalid tax account mapping.');
-        }
+        if ($normalized === '' || $chargeTypeId <= 0) throw new InvalidArgumentException('Invalid tax account mapping.');
 
         $sql = 'SELECT id FROM '.$this->db->prefix().'c_chargesociales WHERE id = '.$chargeTypeId.' LIMIT 1';
         $resql = $this->db->query($sql);
@@ -80,7 +87,8 @@ class BankSyncTaxAccountManager
 
         $sql = 'SELECT rowid FROM '.$this->db->prefix().'banksync_tax_account_map';
         $sql .= ' WHERE entity = '.$this->entity;
-        $sql .= " AND target_account_number = '".$this->db->escape($normalized)."' LIMIT 1";
+        $sql .= " AND target_account_number = '".$this->db->escape($normalized)."'";
+        $sql .= ' AND fk_charge_type = '.$chargeTypeId.' LIMIT 1';
         $resql = $this->db->query($sql);
         if (!$resql) throw new RuntimeException($this->db->lasterror());
         $obj = $this->db->fetch_object($resql);
@@ -88,7 +96,6 @@ class BankSyncTaxAccountManager
 
         if ($obj) {
             $sql = 'UPDATE '.$this->db->prefix().'banksync_tax_account_map SET';
-            $sql .= ' fk_charge_type = '.$chargeTypeId;
             $sql .= ", label = '".$this->db->escape(trim((string) $label))."'";
             $sql .= ', active = 1, fk_user_modif = '.((int) $userId);
             $sql .= ' WHERE rowid = '.((int) $obj->rowid).' AND entity = '.$this->entity;
@@ -124,12 +131,7 @@ class BankSyncTaxAccountManager
         return $rows;
     }
 
-    /**
-     * Return recently seen, still-unmapped destination accounts that look tax related.
-     * This is only an admin convenience; no mapping is created automatically.
-     *
-     * @return array<int,object>
-     */
+    /** @return array<int,object> */
     public function getUnmappedObservedAccounts($limit = 30)
     {
         $rows = array();
@@ -145,7 +147,7 @@ class BankSyncTaxAccountManager
         $resql = $this->db->query($sql);
         if (!$resql) return $rows;
         while ($obj = $this->db->fetch_object($resql)) {
-            if ($this->findByAccount((string) $obj->counterparty_account)) continue;
+            if (!empty($this->getMappingsByAccount((string) $obj->counterparty_account))) continue;
             $rows[] = $obj;
         }
         $this->db->free($resql);
