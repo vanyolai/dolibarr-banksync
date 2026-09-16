@@ -10,7 +10,7 @@
  */
 class BankSyncSchema
 {
-    const VERSION = '0.5.0';
+    const VERSION = '0.5.1';
 
     /**
      * @param DoliDB $db Database handler
@@ -100,6 +100,20 @@ class BankSyncSchema
             ." tms TIMESTAMP\n"
             .") ENGINE=innodb");
 
+        // VAT is a separate Dolibarr business domain (`tva` / `PaymentVAT`), not a
+        // c_chargesociales type, so destination accounts are kept in their own map.
+        self::query($db, "CREATE TABLE IF NOT EXISTS {$prefix}banksync_vat_account_map (\n"
+            ." rowid INTEGER AUTO_INCREMENT PRIMARY KEY,\n"
+            ." entity INTEGER DEFAULT 1 NOT NULL,\n"
+            ." target_account_number VARCHAR(128) NOT NULL,\n"
+            ." label VARCHAR(255),\n"
+            ." active INTEGER DEFAULT 1 NOT NULL,\n"
+            ." date_creation DATETIME NOT NULL,\n"
+            ." fk_user_create INTEGER,\n"
+            ." fk_user_modif INTEGER,\n"
+            ." tms TIMESTAMP\n"
+            .") ENGINE=innodb");
+
         self::ensureColumn($db, $prefix.'banksync_import', 'fk_banksync_account', 'INTEGER NULL');
         self::ensureColumn($db, $prefix.'banksync_transaction', 'fk_banksync_account', 'INTEGER NULL');
         self::ensureColumn($db, $prefix.'banksync_transaction', 'bank_event_type', 'VARCHAR(32) NULL');
@@ -139,6 +153,8 @@ class BankSyncSchema
             'UNIQUE KEY uk_banksync_tax_account_type (entity, target_account_number, fk_charge_type)');
         self::ensureIndex($db, $prefix.'banksync_tax_account_map', 'idx_banksync_tax_charge_type',
             'KEY idx_banksync_tax_charge_type (fk_charge_type)');
+        self::ensureIndex($db, $prefix.'banksync_vat_account_map', 'uk_banksync_vat_account',
+            'UNIQUE KEY uk_banksync_vat_account (entity, target_account_number)');
 
         // A bank fee is already fully reconciled once it has been classified as such:
         // it has no invoice/salary/tax business object to allocate against. Posting remains
