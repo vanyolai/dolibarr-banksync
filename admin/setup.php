@@ -43,7 +43,7 @@ print '<input type="hidden" name="token" value="'.newToken().'">';
 print '<input type="hidden" name="action" value="save">';
 print '<table class="noborder centpercent">';
 print '<tr class="liste_titre"><th>'.$langs->trans('Parameter').'</th><th>'.$langs->trans('Value').'</th></tr>';
-print '<tr class="oddeven"><td>'.$langs->trans('BankSyncVersion').'</td><td>0.4.1</td></tr>';
+print '<tr class="oddeven"><td>'.$langs->trans('BankSyncVersion').'</td><td>0.5.0</td></tr>';
 print '<tr class="oddeven"><td>'.$langs->trans('BankSyncAvailableProviders').'</td><td>BinX CSV</td></tr>';
 print '<tr class="oddeven"><td>'.$langs->trans('BankSyncPostingMode').'</td><td>'.$langs->trans('BankSyncNativePostingMode').'</td></tr>';
 print '<tr class="oddeven"><td>'.$langs->trans('BankSyncBankFeeAccountancyCode').'<br><span class="opacitymedium">'.$langs->trans('BankSyncBankFeeAccountancyCodeHelp').'</span></td>';
