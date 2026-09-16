@@ -22,13 +22,7 @@ class BankSyncManualSearch
         $this->entity = (int) $entity;
     }
 
-    /**
-     * @param object $transaction BankSync transaction
-     * @param string $targetType Target type
-     * @param string $query Free-text query; blank lists nearest open objects
-     * @param int $limit Maximum result count
-     * @return array<int,array<string,mixed>>
-     */
+    /** @return array<int,array<string,mixed>> */
     public function search($transaction, $targetType, $query = '', $limit = 30)
     {
         $limit = max(1, min(100, (int) $limit));
@@ -41,22 +35,18 @@ class BankSyncManualSearch
                 return $this->searchSalaries($transaction, $query, $limit);
             case BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION:
                 return $this->searchSocialContributions($transaction, $query, $limit);
+            case BankSyncMatchManager::TARGET_VAT:
+                return $this->searchVatDeclarations($transaction, $query, $limit);
             default:
                 return array();
         }
     }
 
-    /**
-     * Resolve one target for display of an already-confirmed manual allocation.
-     *
-     * @return array<string,mixed>|null
-     */
+    /** @return array<string,mixed>|null */
     public function fetchTarget($targetType, $targetId)
     {
         $targetId = (int) $targetId;
-        if ($targetId <= 0) {
-            return null;
-        }
+        if ($targetId <= 0) return null;
 
         switch ((string) $targetType) {
             case BankSyncMatchManager::TARGET_CUSTOMER_INVOICE:
@@ -80,17 +70,21 @@ class BankSyncManualSearch
                 $sql .= ' WHERE s.entity = '.$this->entity.' AND s.rowid = '.$targetId.' LIMIT 1';
                 $resql = $this->db->query($sql);
                 if (!$resql) return null;
-                $obj = $this->db->fetch_object($resql);
-                $this->db->free($resql);
+                $obj = $this->db->fetch_object($resql); $this->db->free($resql);
                 if (!$obj) return null;
                 $remaining = max(0, (float) $obj->amount - (float) $obj->paid_amount);
                 $name = trim((string) $obj->firstname.' '.(string) $obj->lastname);
-                return array('target_type' => BankSyncMatchManager::TARGET_SALARY, 'target_id' => (int) $obj->rowid,
+                return array(
+                    'target_type' => BankSyncMatchManager::TARGET_SALARY,
+                    'target_id' => (int) $obj->rowid,
                     'ref' => trim((string) $obj->ref) !== '' ? (string) $obj->ref : '#'.(int) $obj->rowid,
                     'label' => $name.($obj->label ? ' — '.(string) $obj->label : ''),
                     'date' => $this->salaryPeriodLabel((string) $obj->period_start, (string) $obj->period_end, (string) $obj->payment_date),
-                    'period_start' => (string) $obj->period_start, 'period_end' => (string) $obj->period_end,
-                    'remaining_amount' => $this->decimal($remaining), 'url' => '/salaries/card.php?id='.(int) $obj->rowid);
+                    'period_start' => (string) $obj->period_start,
+                    'period_end' => (string) $obj->period_end,
+                    'remaining_amount' => $this->decimal($remaining),
+                    'url' => '/salaries/card.php?id='.(int) $obj->rowid,
+                );
 
             case BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION:
                 $sql = 'SELECT c.rowid, c.ref, c.date_ech AS target_date, c.amount, c.libelle, cc.libelle AS type_label,';
@@ -99,15 +93,38 @@ class BankSyncManualSearch
                 $sql .= ' WHERE c.entity = '.$this->entity.' AND c.rowid = '.$targetId.' LIMIT 1';
                 $resql = $this->db->query($sql);
                 if (!$resql) return null;
-                $obj = $this->db->fetch_object($resql);
-                $this->db->free($resql);
+                $obj = $this->db->fetch_object($resql); $this->db->free($resql);
                 if (!$obj) return null;
                 $remaining = max(0, (float) $obj->amount - (float) $obj->paid_amount);
-                return array('target_type' => BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION, 'target_id' => (int) $obj->rowid,
+                return array(
+                    'target_type' => BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION,
+                    'target_id' => (int) $obj->rowid,
                     'ref' => trim((string) $obj->ref) !== '' ? (string) $obj->ref : '#'.(int) $obj->rowid,
                     'label' => trim((string) $obj->libelle.($obj->type_label ? ' — '.(string) $obj->type_label : '')),
-                    'date' => (string) $obj->target_date, 'remaining_amount' => $this->decimal($remaining),
-                    'url' => '/compta/sociales/card.php?id='.(int) $obj->rowid);
+                    'date' => (string) $obj->target_date,
+                    'remaining_amount' => $this->decimal($remaining),
+                    'url' => '/compta/sociales/card.php?id='.(int) $obj->rowid,
+                );
+
+            case BankSyncMatchManager::TARGET_VAT:
+                $sql = 'SELECT v.rowid, v.datev AS target_date, v.amount, v.label,';
+                $sql .= ' COALESCE((SELECT SUM(pv.amount) FROM '.$this->db->prefix().'payment_vat AS pv WHERE pv.fk_tva = v.rowid), 0) AS paid_amount';
+                $sql .= ' FROM '.$this->db->prefix().'tva AS v';
+                $sql .= ' WHERE v.entity = '.$this->entity.' AND v.rowid = '.$targetId.' LIMIT 1';
+                $resql = $this->db->query($sql);
+                if (!$resql) return null;
+                $obj = $this->db->fetch_object($resql); $this->db->free($resql);
+                if (!$obj) return null;
+                $remaining = max(0, (float) $obj->amount - (float) $obj->paid_amount);
+                return array(
+                    'target_type' => BankSyncMatchManager::TARGET_VAT,
+                    'target_id' => (int) $obj->rowid,
+                    'ref' => '#'.(int) $obj->rowid,
+                    'label' => trim((string) $obj->label) !== '' ? (string) $obj->label : 'VAT',
+                    'date' => (string) $obj->target_date,
+                    'remaining_amount' => $this->decimal($remaining),
+                    'url' => '/compta/tva/card.php?id='.(int) $obj->rowid,
+                );
         }
         return null;
     }
@@ -145,11 +162,17 @@ class BankSyncManualSearch
             if ($remaining <= 0.00001) continue;
             $preferred = isset($obj->{$preferredRefField}) ? trim((string) $obj->{$preferredRefField}) : '';
             $ref = $preferred !== '' ? $preferred : (string) $obj->ref;
-            $rows[] = array('target_type' => $targetType, 'target_id' => (int) $obj->rowid, 'ref' => $ref,
-                'label' => (string) $obj->target_label, 'date' => (string) $obj->target_date,
+            $rows[] = array(
+                'target_type' => $targetType,
+                'target_id' => (int) $obj->rowid,
+                'ref' => $ref,
+                'label' => (string) $obj->target_label,
+                'date' => (string) $obj->target_date,
                 'remaining_amount' => $this->decimal($remaining),
                 'suggested_allocation' => $this->decimal(min($bankAmount, $remaining)),
-                'distance' => abs($remaining - $bankAmount), 'url' => $urlPrefix.(int) $obj->rowid);
+                'distance' => abs($remaining - $bankAmount),
+                'url' => $urlPrefix.(int) $obj->rowid,
+            );
         }
         $this->db->free($resql);
         usort($rows, function ($a, $b) {
@@ -163,15 +186,19 @@ class BankSyncManualSearch
     {
         $resql = $this->db->query($sql);
         if (!$resql) return null;
-        $obj = $this->db->fetch_object($resql);
-        $this->db->free($resql);
+        $obj = $this->db->fetch_object($resql); $this->db->free($resql);
         if (!$obj) return null;
         $remaining = max(0, (float) $obj->total_ttc - (float) $obj->paid_amount);
         $preferred = isset($obj->{$preferredRefField}) ? trim((string) $obj->{$preferredRefField}) : '';
-        return array('target_type' => $targetType, 'target_id' => (int) $obj->rowid,
-            'ref' => $preferred !== '' ? $preferred : (string) $obj->ref, 'label' => (string) $obj->target_label,
-            'date' => (string) $obj->target_date, 'remaining_amount' => $this->decimal($remaining),
-            'url' => $urlPrefix.(int) $obj->rowid);
+        return array(
+            'target_type' => $targetType,
+            'target_id' => (int) $obj->rowid,
+            'ref' => $preferred !== '' ? $preferred : (string) $obj->ref,
+            'label' => (string) $obj->target_label,
+            'date' => (string) $obj->target_date,
+            'remaining_amount' => $this->decimal($remaining),
+            'url' => $urlPrefix.(int) $obj->rowid,
+        );
     }
 
     private function searchSalaries($transaction, $query, $limit)
@@ -190,14 +217,20 @@ class BankSyncManualSearch
             if ($remaining <= 0.00001) continue;
             $name = trim((string) $obj->firstname.' '.(string) $obj->lastname);
             $periodDate = trim((string) $obj->period_end) !== '' ? (string) $obj->period_end : (trim((string) $obj->period_start) !== '' ? (string) $obj->period_start : (string) $obj->payment_date);
-            $rows[] = array('target_type' => BankSyncMatchManager::TARGET_SALARY, 'target_id' => (int) $obj->rowid,
+            $rows[] = array(
+                'target_type' => BankSyncMatchManager::TARGET_SALARY,
+                'target_id' => (int) $obj->rowid,
                 'ref' => trim((string) $obj->ref) !== '' ? (string) $obj->ref : '#'.(int) $obj->rowid,
                 'label' => $name.($obj->label ? ' — '.(string) $obj->label : ''),
                 'date' => $this->salaryPeriodLabel((string) $obj->period_start, (string) $obj->period_end, (string) $obj->payment_date),
-                'period_start' => (string) $obj->period_start, 'period_end' => (string) $obj->period_end,
-                'remaining_amount' => $this->decimal($remaining), 'suggested_allocation' => $this->decimal(min($bankAmount, $remaining)),
-                'distance' => abs($remaining - $bankAmount), 'date_distance' => $this->dayDistance((string) $transaction->booking_date, $periodDate),
-                'url' => '/salaries/card.php?id='.(int) $obj->rowid);
+                'period_start' => (string) $obj->period_start,
+                'period_end' => (string) $obj->period_end,
+                'remaining_amount' => $this->decimal($remaining),
+                'suggested_allocation' => $this->decimal(min($bankAmount, $remaining)),
+                'distance' => abs($remaining - $bankAmount),
+                'date_distance' => $this->dayDistance((string) $transaction->booking_date, $periodDate),
+                'url' => '/salaries/card.php?id='.(int) $obj->rowid,
+            );
         }
         $this->db->free($resql);
         usort($rows, function ($a, $b) {
@@ -223,22 +256,69 @@ class BankSyncManualSearch
         while ($obj = $this->db->fetch_object($resql)) {
             $remaining = max(0, (float) $obj->amount - (float) $obj->paid_amount);
             if ($remaining <= 0.00001) continue;
-            $rows[] = array('target_type' => BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION, 'target_id' => (int) $obj->rowid,
+            $rows[] = array(
+                'target_type' => BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION,
+                'target_id' => (int) $obj->rowid,
                 'ref' => trim((string) $obj->ref) !== '' ? (string) $obj->ref : '#'.(int) $obj->rowid,
                 'label' => trim((string) $obj->libelle.($obj->type_label ? ' — '.(string) $obj->type_label : '')),
-                'date' => (string) $obj->target_date, 'remaining_amount' => $this->decimal($remaining),
-                'suggested_allocation' => $this->decimal(min($bankAmount, $remaining)), 'distance' => abs($remaining - $bankAmount),
-                'url' => '/compta/sociales/card.php?id='.(int) $obj->rowid);
+                'date' => (string) $obj->target_date,
+                'remaining_amount' => $this->decimal($remaining),
+                'suggested_allocation' => $this->decimal(min($bankAmount, $remaining)),
+                'distance' => abs($remaining - $bankAmount),
+                'url' => '/compta/sociales/card.php?id='.(int) $obj->rowid,
+            );
         }
         $this->db->free($resql);
         usort($rows, function ($a, $b) { return $a['distance'] <=> $b['distance']; });
         return array_slice($rows, 0, $limit);
     }
 
+    private function searchVatDeclarations($transaction, $query, $limit)
+    {
+        $sql = 'SELECT v.rowid, v.datev AS target_date, v.amount, v.label,';
+        $sql .= ' COALESCE((SELECT SUM(pv.amount) FROM '.$this->db->prefix().'payment_vat AS pv WHERE pv.fk_tva = v.rowid), 0) AS paid_amount';
+        $sql .= ' FROM '.$this->db->prefix().'tva AS v';
+        $sql .= ' WHERE v.entity = '.$this->entity.' AND v.paye = 0';
+        $query = trim((string) $query);
+        if ($query !== '') {
+            $escaped = $this->db->escape($query);
+            $conditions = array("v.label LIKE '%".$escaped."%'");
+            if (ctype_digit($query)) $conditions[] = 'v.rowid = '.((int) $query);
+            $sql .= ' AND ('.implode(' OR ', $conditions).')';
+        }
+        $sql .= ' ORDER BY v.datev DESC, v.rowid DESC'.$this->db->plimit(200, 0);
+        $resql = $this->db->query($sql);
+        if (!$resql) return array();
+        $rows = array(); $bankAmount = abs((float) $transaction->amount);
+        while ($obj = $this->db->fetch_object($resql)) {
+            $remaining = max(0, (float) $obj->amount - (float) $obj->paid_amount);
+            if ($remaining <= 0.00001) continue;
+            $rows[] = array(
+                'target_type' => BankSyncMatchManager::TARGET_VAT,
+                'target_id' => (int) $obj->rowid,
+                'ref' => '#'.(int) $obj->rowid,
+                'label' => trim((string) $obj->label) !== '' ? (string) $obj->label : 'VAT',
+                'date' => (string) $obj->target_date,
+                'remaining_amount' => $this->decimal($remaining),
+                'suggested_allocation' => $this->decimal(min($bankAmount, $remaining)),
+                'distance' => abs($remaining - $bankAmount),
+                'date_distance' => $this->dayDistance((string) $transaction->booking_date, (string) $obj->target_date),
+                'url' => '/compta/tva/card.php?id='.(int) $obj->rowid,
+            );
+        }
+        $this->db->free($resql);
+        usort($rows, function ($a, $b) {
+            if ((float) $a['distance'] != (float) $b['distance']) return ((float) $a['distance'] < (float) $b['distance']) ? -1 : 1;
+            $da = $a['date_distance'] === null ? PHP_INT_MAX : (int) $a['date_distance'];
+            $db = $b['date_distance'] === null ? PHP_INT_MAX : (int) $b['date_distance'];
+            return $da <=> $db;
+        });
+        return array_slice($rows, 0, $limit);
+    }
+
     private function salaryPeriodLabel($start, $end, $fallback = '')
     {
-        $start = trim((string) $start);
-        $end = trim((string) $end);
+        $start = trim((string) $start); $end = trim((string) $end);
         if ($start !== '' && $end !== '') return $start.' – '.$end;
         if ($start !== '') return $start;
         if ($end !== '') return $end;
@@ -248,8 +328,7 @@ class BankSyncManualSearch
     private function dayDistance($dateA, $dateB)
     {
         if (!preg_match('/^\d{4}-\d{2}-\d{2}/', (string) $dateA) || !preg_match('/^\d{4}-\d{2}-\d{2}/', (string) $dateB)) return null;
-        $a = strtotime(substr((string) $dateA, 0, 10));
-        $b = strtotime(substr((string) $dateB, 0, 10));
+        $a = strtotime(substr((string) $dateA, 0, 10)); $b = strtotime(substr((string) $dateB, 0, 10));
         if ($a === false || $b === false) return null;
         return (int) floor(abs($a - $b) / 86400);
     }
