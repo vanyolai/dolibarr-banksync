@@ -96,7 +96,7 @@ class BankSyncTaxAccountManager
 
         if ($obj) {
             $sql = 'UPDATE '.$this->db->prefix().'banksync_tax_account_map SET';
-            $sql .= ", label = '".$this->db->escape(trim((string) $label))."'";
+            $sql .= " label = '".$this->db->escape(trim((string) $label))."'";
             $sql .= ', active = 1, fk_user_modif = '.((int) $userId);
             $sql .= ' WHERE rowid = '.((int) $obj->rowid).' AND entity = '.$this->entity;
         } else {
@@ -131,26 +131,77 @@ class BankSyncTaxAccountManager
         return $rows;
     }
 
-    /** @return array<int,object> */
+    /**
+     * Return recently seen destination accounts whose bank text really looks tax-related.
+     *
+     * Short markers such as "TB" must match complete tokens. A substring search would
+     * incorrectly classify names such as "BestByte" because they happen to contain "TB".
+     * VAT/ÁFA accounts are included in discovery as well, even though their mapping and
+     * posting workflow is handled separately from ChargeSociales.
+     *
+     * @return array<int,object>
+     */
     public function getUnmappedObservedAccounts($limit = 30)
     {
         $rows = array();
-        $sql = 'SELECT counterparty_account, MAX(counterparty_name) AS counterparty_name, MAX(booking_date) AS last_date, COUNT(*) AS tx_count';
+        $scanLimit = max(100, max(1, (int) $limit) * 8);
+        $sql = 'SELECT counterparty_account, MAX(counterparty_name) AS counterparty_name,';
+        $sql .= ' MAX(reference) AS bank_reference, MAX(booking_date) AS last_date, COUNT(*) AS tx_count';
         $sql .= ' FROM '.$this->db->prefix().'banksync_transaction';
         $sql .= ' WHERE entity = '.$this->entity;
         $sql .= " AND counterparty_account IS NOT NULL AND counterparty_account <> ''";
-        $sql .= " AND (UPPER(counterparty_name) LIKE '%NAV%' OR UPPER(counterparty_name) LIKE '%ADÓ%' OR UPPER(counterparty_name) LIKE '%ADO%'";
-        $sql .= " OR UPPER(counterparty_name) LIKE '%JÁRULÉK%' OR UPPER(counterparty_name) LIKE '%JARULEK%' OR UPPER(counterparty_name) LIKE '%SZOCHO%'";
-        $sql .= " OR UPPER(counterparty_name) LIKE '%SZJA%' OR UPPER(counterparty_name) LIKE '%TB%')";
         $sql .= ' GROUP BY counterparty_account ORDER BY last_date DESC';
-        $sql .= $this->db->plimit(max(1, (int) $limit), 0);
+        $sql .= $this->db->plimit($scanLimit, 0);
         $resql = $this->db->query($sql);
         if (!$resql) return $rows;
         while ($obj = $this->db->fetch_object($resql)) {
             if (!empty($this->getMappingsByAccount((string) $obj->counterparty_account))) continue;
+            if (!$this->looksTaxRelated((string) $obj->counterparty_name, (string) $obj->bank_reference)) continue;
+            $obj->suggested_kind = $this->looksVatRelated((string) $obj->counterparty_name, (string) $obj->bank_reference) ? 'vat' : 'social_contribution';
             $rows[] = $obj;
+            if (count($rows) >= max(1, (int) $limit)) break;
         }
         $this->db->free($resql);
         return $rows;
+    }
+
+    private function looksTaxRelated($name, $reference = '')
+    {
+        $tokens = $this->normalizedTokens((string) $name.' '.(string) $reference);
+        foreach (array('nav', 'ado', 'jarulek', 'szocho', 'szja', 'tb', 'afa', 'vat', 'hipa', 'iparuzesi') as $token) {
+            if (isset($tokens[$token])) return true;
+        }
+        return false;
+    }
+
+    private function looksVatRelated($name, $reference = '')
+    {
+        $tokens = $this->normalizedTokens((string) $name.' '.(string) $reference);
+        return isset($tokens['afa']) || isset($tokens['vat']);
+    }
+
+    /** @return array<string,bool> */
+    private function normalizedTokens($value)
+    {
+        $value = $this->ascii((string) $value);
+        $value = strtolower((string) preg_replace('/[^A-Za-z0-9]+/', ' ', $value));
+        $parts = preg_split('/\s+/', trim($value));
+        $tokens = array();
+        if (is_array($parts)) {
+            foreach ($parts as $part) if ($part !== '') $tokens[$part] = true;
+        }
+        return $tokens;
+    }
+
+    private function ascii($value)
+    {
+        if (function_exists('iconv')) {
+            $converted = @iconv('UTF-8', 'ASCII//TRANSLIT//IGNORE', (string) $value);
+            if ($converted !== false) return $converted;
+        }
+        return strtr((string) $value, array(
+            'á'=>'a','Á'=>'A','é'=>'e','É'=>'E','í'=>'i','Í'=>'I','ó'=>'o','Ó'=>'O','ö'=>'o','Ö'=>'O','ő'=>'o','Ő'=>'O',
+            'ú'=>'u','Ú'=>'U','ü'=>'u','Ü'=>'U','ű'=>'u','Ű'=>'U'
+        ));
     }
 }
