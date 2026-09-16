@@ -19,6 +19,11 @@ function banksyncAdminPrepareHead()
     $head[$h][2] = 'settings';
     $h++;
 
+    $head[$h][0] = dol_buildpath('/banksync/admin/taxaccounts.php', 1);
+    $head[$h][1] = $langs->trans('BankSyncTaxAccountMappings');
+    $head[$h][2] = 'taxaccounts';
+    $h++;
+
     complete_head_from_modules($conf, $langs, null, $head, $h, 'banksync@banksync');
 
     return $head;
