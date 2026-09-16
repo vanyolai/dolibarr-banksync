@@ -67,6 +67,14 @@ function banksyncReturnToListUrl($returnState)
     return $url;
 }
 
+function banksyncCompactDecimalInput($value)
+{
+    $value = trim((string) $value);
+    if ($value === '' || strpos($value, '.') === false) return $value;
+    $value = rtrim(rtrim($value, '0'), '.');
+    return ($value === '' || $value === '-0') ? '0' : $value;
+}
+
 $entity = (int) $conf->entity;
 $transactionId = GETPOSTINT('id');
 $action = GETPOST('action', 'aZ09');
@@ -214,7 +222,7 @@ print '</td></tr>';
 print '<tr><td>'.$langs->trans('BankSyncReference').'</td><td>'.dol_escape_htmltag((string) $transaction->reference).'</td></tr>';
 print '<tr><td>'.$langs->trans('Amount').'</td><td><strong>'.price($transaction->amount).' '.dol_escape_htmltag((string) $transaction->currency).'</strong></td></tr>';
 print '<tr><td>'.$langs->trans('BankSyncDolibarrBankAccount').'</td><td>'.(!empty($transaction->fk_bank_account) ? dol_escape_htmltag(trim((string) $transaction->bank_account_label) !== '' ? (string) $transaction->bank_account_label : (string) $transaction->bank_account_ref) : '<span class="error">'.$langs->trans('BankSyncUnmapped').'</span>').'</td></tr>';
-$statusLabelKey = ((string) $transaction->bank_event_type === 'bank_fee' && (string) $transaction->status === 'new') ? 'BankSyncPostingReady' : 'BankSyncTransactionStatus_'.(string) $transaction->status;
+$statusLabelKey = 'BankSyncTransactionStatus_'.(string) $transaction->status;
 $statusLabel = $langs->trans($statusLabelKey);
 if ($statusLabel === $statusLabelKey) $statusLabel = (string) $transaction->status;
 print '<tr><td>'.$langs->trans('Status').'</td><td>'.dol_escape_htmltag($statusLabel).'</td></tr>';
@@ -270,7 +278,7 @@ if ((string) $transaction->bank_event_type === 'bank_fee') {
                 print '<form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'" class="inline-block">';
                 print '<input type="hidden" name="token" value="'.newToken().'"><input type="hidden" name="id" value="'.$transactionId.'"><input type="hidden" name="match_id" value="'.(int) $candidate['match_id'].'"><input type="hidden" name="action" value="confirm">';
                 if ($returnState !== '') print '<input type="hidden" name="return_state" value="'.dol_escape_htmltag($returnState).'">';
-                print '<input class="right" style="width:110px" type="text" name="allocated_amount" value="'.dol_escape_htmltag((string) $candidate['allocated_amount']).'"> ';
+                print '<input class="right" style="width:110px" type="text" name="allocated_amount" value="'.dol_escape_htmltag(banksyncCompactDecimalInput($candidate['allocated_amount'])).'"> ';
                 print '<button type="submit" class="button button-save">'.$langs->trans('BankSyncConfirmMatch').'</button></form> ';
             }
             if ($status !== 'rejected' && $status !== 'posted') {
@@ -311,7 +319,7 @@ if ((string) $transaction->bank_event_type !== 'bank_fee') {
                 print '<td class="right nowrap"><form method="POST" action="'.dol_escape_htmltag($_SERVER['PHP_SELF']).'" class="inline-block">';
                 print '<input type="hidden" name="token" value="'.newToken().'"><input type="hidden" name="id" value="'.$transactionId.'"><input type="hidden" name="action" value="manual_confirm"><input type="hidden" name="target_type" value="'.dol_escape_htmltag((string) $result['target_type']).'"><input type="hidden" name="target_id" value="'.(int) $result['target_id'].'">';
                 if ($returnState !== '') print '<input type="hidden" name="return_state" value="'.dol_escape_htmltag($returnState).'">';
-                print '<input class="right" style="width:110px" type="text" name="allocated_amount" value="'.dol_escape_htmltag(number_format($defaultAllocation, 2, '.', '')).'"> '.dol_escape_htmltag((string) $transaction->currency).' ';
+                print '<input class="right" style="width:110px" type="text" name="allocated_amount" value="'.dol_escape_htmltag(banksyncCompactDecimalInput(number_format($defaultAllocation, 8, '.', ''))).'"> '.dol_escape_htmltag((string) $transaction->currency).' ';
                 print '<button type="submit" class="button button-save">'.$langs->trans('BankSyncManualAssign').'</button></form></td></tr>';
             }
         }
