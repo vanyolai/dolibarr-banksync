@@ -33,36 +33,21 @@ class BankSyncCandidateMatcher
         $this->taxAccountManager = new BankSyncTaxAccountManager($db, $this->entity);
     }
 
-    /**
-     * Rebuild suggested matches for one transaction and return scored candidates.
-     * Confirmed/rejected/posted decisions are preserved.
-     *
-     * @param int $transactionId BankSync transaction rowid
-     * @param int $userId User doing the refresh
-     * @param int $limit Maximum number of ordinary candidates to persist/return
-     * @return array<int,array<string,mixed>>
-     */
+    /** @return array<int,array<string,mixed>> */
     public function refreshSuggestions($transactionId, $userId, $limit = 8)
     {
         $transaction = $this->fetchTransaction($transactionId);
-        if (!$transaction) {
-            throw new RuntimeException('BankSync transaction not found.');
-        }
+        if (!$transaction) throw new RuntimeException('BankSync transaction not found.');
 
         $this->matchManager->clearSuggested($transactionId);
-
-        if ((string) $transaction->bank_event_type === 'bank_fee') {
-            return array();
-        }
+        if ((string) $transaction->bank_event_type === 'bank_fee') return array();
 
         $preservedDecisions = array();
         $hasConfirmedOrPosted = false;
         foreach ($this->matchManager->getForTransaction($transactionId) as $existingMatch) {
             $key = (string) $existingMatch->target_type.':'.(int) $existingMatch->target_id;
             $preservedDecisions[$key] = (string) $existingMatch->status;
-            if (in_array((string) $existingMatch->status, array('confirmed', 'posted'), true)) {
-                $hasConfirmedOrPosted = true;
-            }
+            if (in_array((string) $existingMatch->status, array('confirmed', 'posted'), true)) $hasConfirmedOrPosted = true;
         }
 
         $candidates = array();
@@ -70,25 +55,23 @@ class BankSyncCandidateMatcher
         $isDebit = !$isCredit;
         $eventType = (string) $transaction->bank_event_type;
 
-        // An explicitly configured tax destination account is a stronger domain signal
-        // than partner-name heuristics. When it matches, only social/fiscal contribution
-        // objects of the configured type are considered for this bank transaction.
-        $taxMapping = null;
+        // Explicit destination-account mappings are stronger than generic partner/name
+        // heuristics. One account may identify several Dolibarr contribution types; these
+        // are considered together and grouped by accounting period.
+        $taxMappings = array();
         if ($isDebit && in_array($eventType, array('transfer', 'other'), true)) {
-            $taxMapping = $this->taxAccountManager->findByAccount((string) $transaction->counterparty_account);
+            $taxMappings = $this->taxAccountManager->getMappingsByAccount((string) $transaction->counterparty_account);
         }
 
-        if ($taxMapping) {
-            $candidates = $this->findSocialContributions($transaction, $taxMapping);
+        if (!empty($taxMappings)) {
+            $candidates = $this->findSocialContributions($transaction, $taxMappings);
         } else {
             if ($isCredit && in_array($eventType, array('transfer', 'refund', 'other'), true)) {
                 $candidates = array_merge($candidates, $this->findCustomerInvoices($transaction));
             }
-
             if ($isDebit && in_array($eventType, array('transfer', 'card', 'direct_debit', 'other'), true)) {
                 $candidates = array_merge($candidates, $this->findSupplierInvoices($transaction));
             }
-
             if ($isDebit && in_array($eventType, array('transfer', 'other'), true)) {
                 $candidates = array_merge($candidates, $this->findSalaries($transaction));
                 $candidates = array_merge($candidates, $this->findSocialContributions($transaction));
@@ -96,24 +79,17 @@ class BankSyncCandidateMatcher
         }
 
         usort($candidates, function ($a, $b) {
-            if ((int) $a['confidence'] !== (int) $b['confidence']) {
-                return ((int) $a['confidence'] > (int) $b['confidence']) ? -1 : 1;
-            }
+            if ((int) $a['confidence'] !== (int) $b['confidence']) return ((int) $a['confidence'] > (int) $b['confidence']) ? -1 : 1;
             $dateA = isset($a['date_distance']) ? (int) $a['date_distance'] : PHP_INT_MAX;
             $dateB = isset($b['date_distance']) ? (int) $b['date_distance'] : PHP_INT_MAX;
-            if ($dateA !== $dateB) {
-                return $dateA < $dateB ? -1 : 1;
-            }
+            if ($dateA !== $dateB) return $dateA < $dateB ? -1 : 1;
             $amountA = isset($a['amount_distance']) ? (float) $a['amount_distance'] : PHP_INT_MAX;
             $amountB = isset($b['amount_distance']) ? (float) $b['amount_distance'] : PHP_INT_MAX;
-            if ($amountA != $amountB) {
-                return $amountA < $amountB ? -1 : 1;
-            }
+            if ($amountA != $amountB) return $amountA < $amountB ? -1 : 1;
             return strcmp((string) $a['target_type'].':'.(string) $a['target_id'], (string) $b['target_type'].':'.(string) $b['target_id']);
         });
 
-        // Never truncate an exact mapped tax group: all component charges are needed
-        // for the allocation to balance and for the group to be auto-confirmable.
+        // Never truncate a strict tax group; every component is needed for balancing.
         $autoGroupSizes = array();
         foreach ($candidates as $candidate) {
             if (!empty($candidate['auto_confirm_group']) && !empty($candidate['group_key'])) {
@@ -150,8 +126,6 @@ class BankSyncCandidateMatcher
         }
 
         if (!$hasConfirmedOrPosted) {
-            // Auto-confirm one unambiguous invoice candidate with exact amount, full
-            // reference and strong identity signal.
             $autoConfirmCandidate = null;
             foreach ($deduped as $candidate) {
                 $key = (string) $candidate['target_type'].':'.(int) $candidate['target_id'];
@@ -179,10 +153,9 @@ class BankSyncCandidateMatcher
         }
 
         if (!$hasConfirmedOrPosted) {
-            // A configured destination account + one unique contribution period whose
-            // complete open balance equals the bank transfer is deterministic enough to
-            // confirm all group components automatically. Any preserved rejection blocks
-            // automatic confirmation of the whole group.
+            // Exact configured account + one unique period group + exact aggregate open
+            // balance is deterministic. Confirm every component in the group atomically at
+            // the reconciliation-model level; native posting remains a separate action.
             $groups = array();
             foreach ($deduped as $candidate) {
                 if (empty($candidate['auto_confirm_group']) || empty($candidate['group_key'])) continue;
@@ -228,7 +201,6 @@ class BankSyncCandidateMatcher
                 'allocated_amount' => (string) $match->allocated_amount,
             );
         }
-
         foreach ($deduped as &$candidate) {
             $key = (string) $candidate['target_type'].':'.(int) $candidate['target_id'];
             if (isset($statuses[$key])) {
@@ -241,7 +213,6 @@ class BankSyncCandidateMatcher
             }
         }
         unset($candidate);
-
         return $deduped;
     }
 
@@ -349,6 +320,7 @@ class BankSyncCandidateMatcher
         $reasonCodes = array();
         $amount = abs((float) $transaction->amount);
         $isCard = ((string) $transaction->bank_event_type === 'card');
+
         if ($this->moneyEquals($amount, $remaining)) {
             $score += 40; $reasons[] = 'Exact amount'; $reasonCodes[] = 'amount';
         } elseif ($remaining > 0 && $amount > 0 && abs($amount - $remaining) / max($amount, $remaining) <= 0.02) {
@@ -415,6 +387,7 @@ class BankSyncCandidateMatcher
         $sql .= $periodFilter.' ORDER BY COALESCE(s.dateep, s.datesp, s.datep) DESC, s.rowid DESC'.$this->db->plimit(150, 0);
         $resql = $this->db->query($sql);
         if (!$resql) return $rows;
+
         $bankText = $this->normalizeText((string) $transaction->counterparty_name.' '.(string) $transaction->reference);
         $salaryMarker = $this->containsAny($bankText, array('munkaber', 'berfizetes', 'salary', 'wage', 'payroll'));
         $amount = abs((float) $transaction->amount);
@@ -461,11 +434,12 @@ class BankSyncCandidateMatcher
     }
 
     /**
-     * Social/fiscal contribution candidates. With an explicit destination-account
-     * mapping we group open contributions by contribution type + accounting period and
-     * compare the whole group's open balance to the bank transfer.
+     * @param object $transaction
+     * @param array<int,object> $taxMappings Empty means heuristic mode; otherwise all
+     *        configured contribution types for the exact destination bank account.
+     * @return array<int,array<string,mixed>>
      */
-    private function findSocialContributions($transaction, $taxMapping = null)
+    private function findSocialContributions($transaction, array $taxMappings = array())
     {
         $rows = array();
         $dateFilter = $this->dateFilter('c.date_ech', (string) $transaction->booking_date, 180, 90);
@@ -474,7 +448,18 @@ class BankSyncCandidateMatcher
         $sql .= ' COALESCE((SELECT SUM(pc.amount) FROM '.$this->db->prefix().'paiementcharge AS pc WHERE pc.fk_charge = c.rowid), 0) AS paid_amount';
         $sql .= ' FROM '.$this->db->prefix().'chargesociales AS c LEFT JOIN '.$this->db->prefix().'c_chargesociales AS ct ON ct.id = c.fk_type';
         $sql .= ' WHERE c.entity = '.$this->entity.' AND c.paye = 0 AND c.amount > 0';
-        if ($taxMapping && (int) $taxMapping->fk_charge_type > 0) $sql .= ' AND c.fk_type = '.((int) $taxMapping->fk_charge_type);
+
+        $mappedTypeIds = array();
+        $mappedTypeLabels = array();
+        if (!empty($taxMappings)) {
+            foreach ($taxMappings as $mapping) {
+                $id = (int) $mapping->fk_charge_type;
+                if ($id > 0) $mappedTypeIds[$id] = $id;
+                $label = trim((string) $mapping->type_label);
+                if ($label !== '') $mappedTypeLabels[$label] = $label;
+            }
+            if (!empty($mappedTypeIds)) $sql .= ' AND c.fk_type IN ('.implode(',', $mappedTypeIds).')';
+        }
         $sql .= $dateFilter.' ORDER BY c.periode DESC, c.date_ech DESC, c.rowid DESC'.$this->db->plimit(250, 0);
         $resql = $this->db->query($sql);
         if (!$resql) return $rows;
@@ -491,12 +476,15 @@ class BankSyncCandidateMatcher
         }
         $this->db->free($resql);
 
-        if ($taxMapping) {
+        if (!empty($taxMappings)) {
+            // Group across every type mapped to this destination account. This supports
+            // cases such as several related TB categories being paid in one bank transfer.
             $groups = array();
+            $accountKey = BankSyncTaxAccountManager::normalizeAccount((string) $transaction->counterparty_account);
             foreach ($open as $obj) {
                 $period = trim((string) $obj->periode);
                 if ($period === '') $period = trim((string) $obj->date_ech);
-                $groupKey = 'tax:'.((int) $obj->fk_type).':'.$period;
+                $groupKey = 'tax:'.$accountKey.':'.$period;
                 if (!isset($groups[$groupKey])) {
                     $groups[$groupKey] = array('period' => $period, 'total' => 0.0, 'items' => array(), 'due_date' => (string) $obj->date_ech);
                 }
@@ -510,6 +498,7 @@ class BankSyncCandidateMatcher
                 if ($this->moneyEquals($amount, (float) $group['total'])) $exactGroupKeys[] = $groupKey;
             }
             $uniqueExactGroup = count($exactGroupKeys) === 1 ? (string) $exactGroupKeys[0] : '';
+            $typeSummary = implode(' + ', array_values($mappedTypeLabels));
 
             foreach ($groups as $groupKey => $group) {
                 $groupTotal = (float) $group['total'];
@@ -519,25 +508,10 @@ class BankSyncCandidateMatcher
                     $score = 50;
                     $reasons = array('Configured destination bank account');
                     $reasonCodes = array('tax_account');
-                    if ($exactGroup) {
-                        $score += 35;
-                        $reasons[] = 'Exact grouped open balance';
-                        $reasonCodes[] = 'amount_group';
-                    }
-                    if ($taxMarker) {
-                        $score += 5;
-                        $reasons[] = 'Tax/social contribution marker';
-                        $reasonCodes[] = 'tax_marker';
-                    }
-                    if ($days !== null && $days <= 45) {
-                        $score += 10;
-                        $reasons[] = 'Contribution period/due date close to bank date';
-                        $reasonCodes[] = 'tax_period';
-                    } elseif ($days !== null && $days <= 90) {
-                        $score += 5;
-                        $reasons[] = 'Contribution period/due date within 90 days';
-                        $reasonCodes[] = 'date_near';
-                    }
+                    if ($exactGroup) { $score += 35; $reasons[] = 'Exact grouped open balance'; $reasonCodes[] = 'amount_group'; }
+                    if ($taxMarker) { $score += 5; $reasons[] = 'Tax/social contribution marker'; $reasonCodes[] = 'tax_marker'; }
+                    if ($days !== null && $days <= 45) { $score += 10; $reasons[] = 'Contribution period/due date close to bank date'; $reasonCodes[] = 'tax_period'; }
+                    elseif ($days !== null && $days <= 90) { $score += 5; $reasons[] = 'Contribution period/due date within 90 days'; $reasonCodes[] = 'date_near'; }
                     $score = min(100, $score);
                     $label = trim((string) $obj->libelle);
                     if (trim((string) $obj->type_label) !== '') $label .= ($label !== '' ? ' — ' : '').(string) $obj->type_label;
@@ -556,7 +530,7 @@ class BankSyncCandidateMatcher
                         'amount_distance' => abs($amount - $groupTotal),
                         'url' => '/compta/sociales/card.php?id='.(int) $obj->rowid,
                         'group_key' => $groupKey,
-                        'group_label' => trim((string) $taxMapping->type_label).' — '.(string) $group['period'],
+                        'group_label' => $typeSummary.($typeSummary !== '' ? ' — ' : '').(string) $group['period'],
                         'group_total' => $this->decimalString($groupTotal),
                         'group_count' => count($group['items']),
                         'auto_confirm_group' => ($uniqueExactGroup !== '' && $groupKey === $uniqueExactGroup && ($days === null || $days <= 90)),
@@ -566,7 +540,7 @@ class BankSyncCandidateMatcher
             return $rows;
         }
 
-        // No explicit mapping: retain the advisory per-item heuristic.
+        // Without explicit mapping, retain advisory per-item heuristics only.
         foreach ($open as $obj) {
             $remaining = (float) $obj->_remaining;
             $score = 0; $reasons = array(); $reasonCodes = array();
@@ -683,7 +657,8 @@ class BankSyncCandidateMatcher
 
     private function salaryPeriodLabel($start, $end, $fallback = '')
     {
-        $start = trim((string) $start); $end = trim((string) $end);
+        $start = trim((string) $start);
+        $end = trim((string) $end);
         if ($start !== '' && $end !== '') return $start.' – '.$end;
         if ($start !== '') return $start;
         if ($end !== '') return $end;
