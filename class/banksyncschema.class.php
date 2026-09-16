@@ -130,8 +130,13 @@ class BankSyncSchema
             'KEY idx_banksync_posting_item_posting (fk_posting)');
         self::ensureIndex($db, $prefix.'banksync_posting_item', 'idx_banksync_posting_item_native',
             'KEY idx_banksync_posting_item_native (native_object_type, native_object_id)');
-        self::ensureIndex($db, $prefix.'banksync_tax_account_map', 'uk_banksync_tax_account',
-            'UNIQUE KEY uk_banksync_tax_account (entity, target_account_number)');
+
+        // 0.5.0 originally allowed one contribution type per destination account. Keep
+        // development installations forward-compatible when upgrading to the more general
+        // account+type mapping model.
+        self::dropIndexIfExists($db, $prefix.'banksync_tax_account_map', 'uk_banksync_tax_account');
+        self::ensureIndex($db, $prefix.'banksync_tax_account_map', 'uk_banksync_tax_account_type',
+            'UNIQUE KEY uk_banksync_tax_account_type (entity, target_account_number, fk_charge_type)');
         self::ensureIndex($db, $prefix.'banksync_tax_account_map', 'idx_banksync_tax_charge_type',
             'KEY idx_banksync_tax_charge_type (fk_charge_type)');
 
@@ -145,33 +150,32 @@ class BankSyncSchema
     private static function ensureColumn($db, $table, $column, $definition)
     {
         $resql = $db->query("SHOW COLUMNS FROM {$table} LIKE '".$db->escape($column)."'");
-        if (!$resql) {
-            throw new RuntimeException($db->lasterror());
-        }
+        if (!$resql) throw new RuntimeException($db->lasterror());
         $exists = $db->num_rows($resql) > 0;
         $db->free($resql);
-        if (!$exists) {
-            self::query($db, "ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
-        }
+        if (!$exists) self::query($db, "ALTER TABLE {$table} ADD COLUMN {$column} {$definition}");
     }
 
     private static function ensureIndex($db, $table, $index, $definition)
     {
         $resql = $db->query("SHOW INDEX FROM {$table} WHERE Key_name = '".$db->escape($index)."'");
-        if (!$resql) {
-            throw new RuntimeException($db->lasterror());
-        }
+        if (!$resql) throw new RuntimeException($db->lasterror());
         $exists = $db->num_rows($resql) > 0;
         $db->free($resql);
-        if (!$exists) {
-            self::query($db, "ALTER TABLE {$table} ADD {$definition}");
-        }
+        if (!$exists) self::query($db, "ALTER TABLE {$table} ADD {$definition}");
+    }
+
+    private static function dropIndexIfExists($db, $table, $index)
+    {
+        $resql = $db->query("SHOW INDEX FROM {$table} WHERE Key_name = '".$db->escape($index)."'");
+        if (!$resql) throw new RuntimeException($db->lasterror());
+        $exists = $db->num_rows($resql) > 0;
+        $db->free($resql);
+        if ($exists) self::query($db, "ALTER TABLE {$table} DROP INDEX {$index}");
     }
 
     private static function query($db, $sql)
     {
-        if (!$db->query($sql)) {
-            throw new RuntimeException($db->lasterror());
-        }
+        if (!$db->query($sql)) throw new RuntimeException($db->lasterror());
     }
 }
