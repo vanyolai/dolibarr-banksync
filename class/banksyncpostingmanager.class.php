@@ -34,6 +34,21 @@ class BankSyncPostingManager
         return $obj ?: null;
     }
 
+    /** @return array<int,object> */
+    public function getItemsForPosting($postingId)
+    {
+        $rows = array();
+        $sql = 'SELECT rowid, fk_posting, target_type, target_id, native_object_type, native_object_id, fk_bank, amount, date_creation';
+        $sql .= ' FROM '.$this->db->prefix().'banksync_posting_item';
+        $sql .= ' WHERE entity = '.$this->entity.' AND fk_posting = '.((int) $postingId);
+        $sql .= ' ORDER BY rowid ASC';
+        $resql = $this->db->query($sql);
+        if (!$resql) throw new RuntimeException($this->db->lasterror());
+        while ($obj = $this->db->fetch_object($resql)) $rows[] = $obj;
+        $this->db->free($resql);
+        return $rows;
+    }
+
     /**
      * Reserve the transaction for posting. Unique(entity,fk_transaction) is the
      * hard idempotency boundary and also serializes accidental double submits.
@@ -42,9 +57,7 @@ class BankSyncPostingManager
     {
         $existing = $this->getForTransaction($transactionId);
         if ($existing) {
-            if ((string) $existing->status === 'posted') {
-                throw new RuntimeException('BankSyncPostingAlreadyPosted');
-            }
+            if ((string) $existing->status === 'posted') throw new RuntimeException('BankSyncPostingAlreadyPosted');
             throw new RuntimeException('BankSyncPostingAlreadyInProgress');
         }
 
@@ -54,12 +67,23 @@ class BankSyncPostingManager
         $sql .= $this->entity.', '.((int) $transactionId);
         $sql .= ", '".$this->db->escape((string) $postingKind)."', 'processing', '".$this->db->idate(dol_now())."', ".((int) $userId).')';
         if (!$this->db->query($sql)) {
-            // A concurrent request may have won the unique-key race.
             $existing = $this->getForTransaction($transactionId);
             if ($existing) throw new RuntimeException('BankSyncPostingAlreadyInProgress');
             throw new RuntimeException($this->db->lasterror());
         }
         return (int) $this->db->last_insert_id($this->db->prefix().'banksync_posting');
+    }
+
+    public function addItem($postingId, $targetType, $targetId, $nativeType, $nativeId, $bankLineId, $amount)
+    {
+        $sql = 'INSERT INTO '.$this->db->prefix().'banksync_posting_item (';
+        $sql .= 'entity, fk_posting, target_type, target_id, native_object_type, native_object_id, fk_bank, amount, date_creation';
+        $sql .= ') VALUES (';
+        $sql .= $this->entity.', '.((int) $postingId).', ';
+        $sql .= "'".$this->db->escape((string) $targetType)."', ".((int) $targetId).', ';
+        $sql .= "'".$this->db->escape((string) $nativeType)."', ".((int) $nativeId).', ';
+        $sql .= ((int) $bankLineId).", '".$this->db->escape(number_format((float) $amount, 8, '.', ''))."', '".$this->db->idate(dol_now())."')";
+        if (!$this->db->query($sql)) throw new RuntimeException($this->db->lasterror());
     }
 
     public function markPosted($postingId, $nativeType, $nativeId, $bankLineId, $userId)
@@ -78,15 +102,13 @@ class BankSyncPostingManager
     public function markBankSyncObjectsPosted($transactionId, $userId)
     {
         $transactionId = (int) $transactionId;
-
         $sql = 'UPDATE '.$this->db->prefix().'banksync_match SET';
         $sql .= " status = 'posted', fk_user_modif = ".((int) $userId);
         $sql .= ' WHERE entity = '.$this->entity.' AND fk_transaction = '.$transactionId;
         $sql .= " AND status = 'confirmed'";
         if (!$this->db->query($sql)) throw new RuntimeException($this->db->lasterror());
 
-        $sql = 'UPDATE '.$this->db->prefix().'banksync_transaction SET';
-        $sql .= " status = 'posted'";
+        $sql = 'UPDATE '.$this->db->prefix().'banksync_transaction SET status = \'posted\'';
         $sql .= ' WHERE entity = '.$this->entity.' AND rowid = '.$transactionId;
         if (!$this->db->query($sql)) throw new RuntimeException($this->db->lasterror());
     }
