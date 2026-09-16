@@ -14,6 +14,7 @@ class BankSyncMatchManager
     const TARGET_SUPPLIER_INVOICE = 'supplier_invoice';
     const TARGET_SALARY = 'salary';
     const TARGET_SOCIAL_CONTRIBUTION = 'social_contribution';
+    const TARGET_VAT = 'vat';
     const TARGET_EXPENSE_REPORT = 'expense_report';
     const TARGET_TAX = 'tax';
     const TARGET_BANK_FEE = 'bank_fee';
