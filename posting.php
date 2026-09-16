@@ -56,6 +56,7 @@ function banksyncPostingOperationLabel($langs, $kind)
         case BankSyncMatchManager::TARGET_CUSTOMER_INVOICE: return $langs->trans('BankSyncPostingNativeCustomerPayment');
         case BankSyncMatchManager::TARGET_SUPPLIER_INVOICE: return $langs->trans('BankSyncPostingNativeSupplierPayment');
         case BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION: return $langs->trans('BankSyncPostingNativeSocialContribution');
+        case BankSyncMatchManager::TARGET_VAT: return $langs->trans('BankSyncPostingNativeVatPayment');
         case BankSyncMatchManager::TARGET_BANK_FEE: return $langs->trans('BankSyncPostingNativeBankFee');
         default: return $langs->trans('BankSyncPostingTargetNotSupportedYet');
     }
@@ -66,7 +67,7 @@ function banksyncCanNativePost($user, $kind)
     if (!$user->hasRight('banksync', 'post')) return false;
     if ((string) $kind === BankSyncMatchManager::TARGET_CUSTOMER_INVOICE) return $user->hasRight('facture', 'paiement');
     if ((string) $kind === BankSyncMatchManager::TARGET_SUPPLIER_INVOICE) return ($user->hasRight('fournisseur', 'facture', 'creer') || $user->hasRight('supplier_invoice', 'creer'));
-    if ((string) $kind === BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION) return $user->hasRight('tax', 'charges', 'creer');
+    if ((string) $kind === BankSyncMatchManager::TARGET_SOCIAL_CONTRIBUTION || (string) $kind === BankSyncMatchManager::TARGET_VAT) return $user->hasRight('tax', 'charges', 'creer');
     if ((string) $kind === BankSyncMatchManager::TARGET_BANK_FEE) return $user->hasRight('banque', 'modifier');
     return false;
 }
@@ -79,6 +80,7 @@ function banksyncNativeObjectUrl($type, $id)
         case 'payment': return '/compta/paiement/card.php?id='.$id;
         case 'payment_supplier': return '/fourn/paiement/card.php?id='.$id;
         case 'payment_social': return '/compta/payment_sc/card.php?id='.$id;
+        case 'payment_vat': return '/compta/tva/payments.php?mode=tvaonly';
         case 'payment_various': return '/compta/bank/various_payment/card.php?id='.$id;
         default: return '';
     }
