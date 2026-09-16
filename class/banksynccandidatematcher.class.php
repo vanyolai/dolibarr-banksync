@@ -3,13 +3,14 @@
 
 require_once __DIR__.'/banksyncmatchmanager.class.php';
 require_once __DIR__.'/banksynctaxaccountmanager.class.php';
+require_once __DIR__.'/banksyncvataccountmanager.class.php';
 
 /**
  * Finds Dolibarr business objects that may explain a staged bank transaction.
  *
  * Matching is normally advisory: this class never creates native Dolibarr payments.
- * A deliberately narrow class of unambiguous invoice matches and configured tax
- * destination-account groups may be auto-confirmed, while native Dolibarr posting
+ * A deliberately narrow class of unambiguous invoice matches and explicitly mapped
+ * tax/VAT destination-account groups may be auto-confirmed; native Dolibarr posting
  * always remains a separate explicit workflow.
  */
 class BankSyncCandidateMatcher
@@ -22,6 +23,8 @@ class BankSyncCandidateMatcher
     private $matchManager;
     /** @var BankSyncTaxAccountManager */
     private $taxAccountManager;
+    /** @var BankSyncVatAccountManager */
+    private $vatAccountManager;
     /** @var array<int,array<int,string>> */
     private $partnerAccounts = array();
 
@@ -31,6 +34,7 @@ class BankSyncCandidateMatcher
         $this->entity = (int) $entity;
         $this->matchManager = new BankSyncMatchManager($db, $this->entity);
         $this->taxAccountManager = new BankSyncTaxAccountManager($db, $this->entity);
+        $this->vatAccountManager = new BankSyncVatAccountManager($db, $this->entity);
     }
 
     /** @return array<int,array<string,mixed>> */
@@ -55,16 +59,19 @@ class BankSyncCandidateMatcher
         $isDebit = !$isCredit;
         $eventType = (string) $transaction->bank_event_type;
 
-        // Explicit destination-account mappings are stronger than generic partner/name
-        // heuristics. One account may identify several Dolibarr contribution types; these
-        // are considered together and grouped by accounting period.
+        // Explicit destination-account mappings are stronger than generic heuristics.
+        // Social/fiscal contributions and VAT are separate Dolibarr domains, but both
+        // can be identified from the bank destination account.
         $taxMappings = array();
+        $vatMapping = null;
         if ($isDebit && in_array($eventType, array('transfer', 'other'), true)) {
             $taxMappings = $this->taxAccountManager->getMappingsByAccount((string) $transaction->counterparty_account);
+            $vatMapping = $this->vatAccountManager->findByAccount((string) $transaction->counterparty_account);
         }
 
-        if (!empty($taxMappings)) {
-            $candidates = $this->findSocialContributions($transaction, $taxMappings);
+        if (!empty($taxMappings) || $vatMapping) {
+            if (!empty($taxMappings)) $candidates = array_merge($candidates, $this->findSocialContributions($transaction, $taxMappings));
+            if ($vatMapping) $candidates = array_merge($candidates, $this->findVatDeclarations($transaction, true));
         } else {
             if ($isCredit && in_array($eventType, array('transfer', 'refund', 'other'), true)) {
                 $candidates = array_merge($candidates, $this->findCustomerInvoices($transaction));
@@ -75,6 +82,7 @@ class BankSyncCandidateMatcher
             if ($isDebit && in_array($eventType, array('transfer', 'other'), true)) {
                 $candidates = array_merge($candidates, $this->findSalaries($transaction));
                 $candidates = array_merge($candidates, $this->findSocialContributions($transaction));
+                $candidates = array_merge($candidates, $this->findVatDeclarations($transaction, false));
             }
         }
 
@@ -89,7 +97,7 @@ class BankSyncCandidateMatcher
             return strcmp((string) $a['target_type'].':'.(string) $a['target_id'], (string) $b['target_type'].':'.(string) $b['target_id']);
         });
 
-        // Never truncate a strict tax group; every component is needed for balancing.
+        // Never truncate a strict mapped group; every component is needed for balancing.
         $autoGroupSizes = array();
         foreach ($candidates as $candidate) {
             if (!empty($candidate['auto_confirm_group']) && !empty($candidate['group_key'])) {
@@ -125,6 +133,7 @@ class BankSyncCandidateMatcher
             );
         }
 
+        // Strict invoice auto-confirm stays intentionally narrow.
         if (!$hasConfirmedOrPosted) {
             $autoConfirmCandidate = null;
             foreach ($deduped as $candidate) {
@@ -152,10 +161,10 @@ class BankSyncCandidateMatcher
             }
         }
 
+        // Exact configured destination account + one unique exact group is deterministic.
+        // This is used both for grouped social/fiscal contributions and a single VAT
+        // declaration. If two domains are both plausible, no automatic confirmation occurs.
         if (!$hasConfirmedOrPosted) {
-            // Exact configured account + one unique period group + exact aggregate open
-            // balance is deterministic. Confirm every component in the group atomically at
-            // the reconciliation-model level; native posting remains a separate action.
             $groups = array();
             foreach ($deduped as $candidate) {
                 if (empty($candidate['auto_confirm_group']) || empty($candidate['group_key'])) continue;
@@ -183,7 +192,7 @@ class BankSyncCandidateMatcher
                             (int) $candidate['target_id'],
                             (string) $candidate['allocated_amount'],
                             100,
-                            'auto-confirm:tax-account+period+group-amount',
+                            'auto-confirm:mapped-account+period+amount',
                             'confirmed',
                             (int) $userId
                         );
@@ -315,9 +324,7 @@ class BankSyncCandidateMatcher
 
     private function scoreInvoice($transaction, $invoice, $targetType, $remaining, array $refs)
     {
-        $score = 0;
-        $reasons = array();
-        $reasonCodes = array();
+        $score = 0; $reasons = array(); $reasonCodes = array();
         $amount = abs((float) $transaction->amount);
         $isCard = ((string) $transaction->bank_event_type === 'card');
 
@@ -389,7 +396,7 @@ class BankSyncCandidateMatcher
         if (!$resql) return $rows;
 
         $bankText = $this->normalizeText((string) $transaction->counterparty_name.' '.(string) $transaction->reference);
-        $salaryMarker = $this->containsAny($bankText, array('munkaber', 'berfizetes', 'salary', 'wage', 'payroll'));
+        $salaryMarker = $this->hasAnyToken($bankText, array('munkaber', 'berfizetes', 'salary', 'wage', 'payroll'));
         $amount = abs((float) $transaction->amount);
         while ($obj = $this->db->fetch_object($resql)) {
             $remaining = max(0, (float) $obj->amount - (float) $obj->paid_amount);
@@ -465,7 +472,7 @@ class BankSyncCandidateMatcher
         if (!$resql) return $rows;
 
         $bankText = $this->normalizeText((string) $transaction->counterparty_name.' '.(string) $transaction->reference);
-        $taxMarker = $this->containsAny($bankText, array('nav', 'ado', 'jarulek', 'szocho', 'szja', 'tb', 'social', 'tax'));
+        $taxMarker = $this->hasAnyToken($bankText, array('nav', 'ado', 'jarulek', 'szocho', 'szja', 'tb', 'social', 'tax'));
         $amount = abs((float) $transaction->amount);
         $open = array();
         while ($obj = $this->db->fetch_object($resql)) {
@@ -477,8 +484,6 @@ class BankSyncCandidateMatcher
         $this->db->free($resql);
 
         if (!empty($taxMappings)) {
-            // Group across every type mapped to this destination account. This supports
-            // cases such as several related TB categories being paid in one bank transfer.
             $groups = array();
             $accountKey = BankSyncTaxAccountManager::normalizeAccount((string) $transaction->counterparty_account);
             foreach ($open as $obj) {
@@ -494,9 +499,7 @@ class BankSyncCandidateMatcher
             }
 
             $exactGroupKeys = array();
-            foreach ($groups as $groupKey => $group) {
-                if ($this->moneyEquals($amount, (float) $group['total'])) $exactGroupKeys[] = $groupKey;
-            }
+            foreach ($groups as $groupKey => $group) if ($this->moneyEquals($amount, (float) $group['total'])) $exactGroupKeys[] = $groupKey;
             $uniqueExactGroup = count($exactGroupKeys) === 1 ? (string) $exactGroupKeys[0] : '';
             $typeSummary = implode(' + ', array_values($mappedTypeLabels));
 
@@ -540,7 +543,6 @@ class BankSyncCandidateMatcher
             return $rows;
         }
 
-        // Without explicit mapping, retain advisory per-item heuristics only.
         foreach ($open as $obj) {
             $remaining = (float) $obj->_remaining;
             $score = 0; $reasons = array(); $reasonCodes = array();
@@ -571,6 +573,84 @@ class BankSyncCandidateMatcher
                 'date_distance' => $days === null ? PHP_INT_MAX : $days,
                 'amount_distance' => abs($amount - $remaining),
                 'url' => '/compta/sociales/card.php?id='.(int) $obj->rowid,
+            );
+        }
+        return $rows;
+    }
+
+    /** @return array<int,array<string,mixed>> */
+    private function findVatDeclarations($transaction, $mapped)
+    {
+        $rows = array();
+        $dateFilter = $this->dateFilter('v.datev', (string) $transaction->booking_date, 365, 90);
+        $sql = 'SELECT v.rowid, v.datev, v.amount, v.label,';
+        $sql .= ' COALESCE((SELECT SUM(pv.amount) FROM '.$this->db->prefix().'payment_vat AS pv WHERE pv.fk_tva = v.rowid), 0) AS paid_amount';
+        $sql .= ' FROM '.$this->db->prefix().'tva AS v';
+        $sql .= ' WHERE v.entity = '.$this->entity.' AND v.paye = 0 AND v.amount > 0';
+        $sql .= $dateFilter.' ORDER BY v.datev DESC, v.rowid DESC'.$this->db->plimit(120, 0);
+        $resql = $this->db->query($sql);
+        if (!$resql) return $rows;
+
+        $bankText = $this->normalizeText((string) $transaction->counterparty_name.' '.(string) $transaction->reference);
+        $vatMarker = $this->hasAnyToken($bankText, array('afa', 'vat'));
+        if (!$mapped && !$vatMarker) {
+            $this->db->free($resql);
+            return $rows;
+        }
+
+        $amount = abs((float) $transaction->amount);
+        $open = array();
+        $exactIds = array();
+        while ($obj = $this->db->fetch_object($resql)) {
+            $remaining = max(0, (float) $obj->amount - (float) $obj->paid_amount);
+            if ($remaining <= 0.00001) continue;
+            $obj->_remaining = $remaining;
+            $open[] = $obj;
+            if ($this->moneyEquals($amount, $remaining)) $exactIds[] = (int) $obj->rowid;
+        }
+        $this->db->free($resql);
+        $uniqueExactId = count($exactIds) === 1 ? (int) $exactIds[0] : 0;
+        $accountKey = BankSyncVatAccountManager::normalizeAccount((string) $transaction->counterparty_account);
+
+        foreach ($open as $obj) {
+            $remaining = (float) $obj->_remaining;
+            $exact = $this->moneyEquals($amount, $remaining);
+            $days = $this->dayDistance((string) $transaction->booking_date, (string) $obj->datev);
+            $score = 0; $reasons = array(); $reasonCodes = array();
+            if ($mapped) {
+                $score += 55; $reasons[] = 'Configured VAT destination bank account'; $reasonCodes[] = 'vat_account';
+                if ($exact) { $score += 35; $reasons[] = 'Exact VAT open balance'; $reasonCodes[] = 'amount'; }
+                if ($vatMarker) { $score += 5; $reasons[] = 'VAT marker in bank text'; $reasonCodes[] = 'vat_marker'; }
+                if ($days !== null && $days <= 45) { $score += 10; $reasons[] = 'VAT period close to bank date'; $reasonCodes[] = 'vat_period'; }
+                elseif ($days !== null && $days <= 90) { $score += 5; $reasons[] = 'VAT period within 90 days'; $reasonCodes[] = 'date_near'; }
+            } else {
+                if ($exact) { $score += 45; $reasons[] = 'Exact amount'; $reasonCodes[] = 'amount'; }
+                if ($vatMarker) { $score += 35; $reasons[] = 'VAT marker in bank text'; $reasonCodes[] = 'vat_marker'; }
+                if ($days !== null && $days <= 45) { $score += 15; $reasons[] = 'VAT period close to bank date'; $reasonCodes[] = 'vat_period'; }
+                elseif ($days !== null && $days <= 120) { $score += 5; $reasons[] = 'VAT period within 120 days'; $reasonCodes[] = 'date_near'; }
+            }
+            $score = min(100, $score);
+            if ($score < 50) continue;
+            $groupKey = 'vat:'.$accountKey.':'.(int) $obj->rowid;
+            $rows[] = array(
+                'target_type' => BankSyncMatchManager::TARGET_VAT,
+                'target_id' => (int) $obj->rowid,
+                'ref' => '#'.(int) $obj->rowid,
+                'label' => trim((string) $obj->label) !== '' ? (string) $obj->label : 'VAT',
+                'date' => (string) $obj->datev,
+                'remaining_amount' => $this->decimalString($remaining),
+                'allocated_amount' => $this->decimalString(min($amount, $remaining)),
+                'confidence' => $score,
+                'reasons' => $reasons,
+                'reason_codes' => $reasonCodes,
+                'date_distance' => $days === null ? PHP_INT_MAX : $days,
+                'amount_distance' => abs($amount - $remaining),
+                'url' => '/compta/tva/card.php?id='.(int) $obj->rowid,
+                'group_key' => $groupKey,
+                'group_label' => 'VAT — '.(string) $obj->datev,
+                'group_total' => $this->decimalString($remaining),
+                'group_count' => 1,
+                'auto_confirm_group' => ($mapped && $uniqueExactId > 0 && (int) $obj->rowid === $uniqueExactId && ($days === null || $days <= 90)),
             );
         }
         return $rows;
@@ -637,6 +717,13 @@ class BankSyncCandidateMatcher
         $tb = array_filter(explode(' ', $b), function ($v) use ($stop) { return strlen($v) >= 2 && !isset($stop[$v]); });
         if (empty($ta) || empty($tb)) return 0;
         return count(array_intersect(array_unique($ta), array_unique($tb)));
+    }
+
+    private function hasAnyToken($normalizedText, array $tokens)
+    {
+        $parts = array_flip(array_filter(explode(' ', trim((string) $normalizedText)), 'strlen'));
+        foreach ($tokens as $token) if (isset($parts[$token])) return true;
+        return false;
     }
 
     private function dateFilter($field, $bookingDate, $daysBack, $daysForward)
@@ -711,11 +798,5 @@ class BankSyncCandidateMatcher
             'á'=>'a','Á'=>'A','é'=>'e','É'=>'E','í'=>'i','Í'=>'I','ó'=>'o','Ó'=>'O','ö'=>'o','Ö'=>'O','ő'=>'o','Ő'=>'O',
             'ú'=>'u','Ú'=>'U','ü'=>'u','Ü'=>'U','ű'=>'u','Ű'=>'U','ä'=>'a','Ä'=>'A','ß'=>'ss','č'=>'c','Č'=>'C','š'=>'s','Š'=>'S','ž'=>'z','Ž'=>'Z'
         ));
-    }
-
-    private function containsAny($haystack, array $needles)
-    {
-        foreach ($needles as $needle) if ($needle !== '' && strpos($haystack, $needle) !== false) return true;
-        return false;
     }
 }
